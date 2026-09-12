@@ -108,11 +108,64 @@ SOCKS5
 
 ## Systemd
 
-The old sample unit that modified the host-wide OUTPUT chain has been removed.
+The repository contains the deployment files used by the reference Linux
+exit-node setup:
 
-The repository will contain namespace provisioning and systemd units matching
-the tested production deployment. Those files should keep all OpenFlux-specific
-RST handling inside the `openflux` namespace.
+- `openflux-netns` — creates and removes the dedicated network namespace;
+- `openflux-netns.service` — manages the namespace lifecycle;
+- `openflux-exit.service` — runs the OpenFlux exit process inside the namespace;
+- `sysctl.d/90-openflux.conf` — enables IPv4 forwarding on the host.
+
+The reference deployment uses:
+
+```text
+namespace:  openflux
+host veth:  of-host
+netns veth: of-ns
+subnet:     10.203.0.0/30
+host IP:    10.203.0.1
+netns IP:   10.203.0.2
+WAN:        ens3
+```
+
+If the server's public interface is not `ens3`, change `WAN_IF` in
+`openflux-netns` before installing it.
+
+Install the deployment files:
+
+```bash
+sudo install -m 755 deploy/openflux-netns \
+  /usr/local/sbin/openflux-netns
+
+sudo install -m 644 deploy/sysctl.d/90-openflux.conf \
+  /etc/sysctl.d/90-openflux.conf
+
+sudo install -m 644 deploy/openflux-netns.service \
+  /etc/systemd/system/openflux-netns.service
+
+sudo install -m 644 deploy/openflux-exit.service \
+  /etc/systemd/system/openflux-exit.service
+
+sudo sysctl --system
+sudo systemctl daemon-reload
+sudo systemctl enable --now openflux-netns.service
+sudo systemctl enable --now openflux-exit.service
+```
+
+Before starting `openflux-exit.service`, make sure these files exist:
+
+```text
+/opt/openflux-exit/openflux-exit
+/opt/openflux-exit/document-url.txt
+/opt/openflux-exit/encryption-secret.txt
+```
+
+The service in this repository targets the current Volga-only runtime and
+therefore intentionally does not pass a `--transport` argument.
+
+When upgrading from an older OpenFlux binary that still requires
+`--transport yandex-volga`, replace the binary and the systemd unit together.
+Do not install the new unit while leaving the old binary in place.
 
 ## Current transport stack
 

@@ -4,6 +4,11 @@ All notable changes to this fork are documented here.
 
 ## Unreleased
 
+### Added
+
+- reproducible Linux exit-node deployment files for the isolated network
+  namespace, systemd services and persistent IPv4 forwarding.
+
 ### Changed
 
 - OpenFlux runtime is now Volga-only;

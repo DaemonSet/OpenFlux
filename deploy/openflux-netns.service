@@ -1,0 +1,14 @@
+[Unit]
+Description=OpenFlux network namespace
+Wants=network-online.target
+After=network-online.target systemd-sysctl.service
+Before=openflux-exit.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/openflux-netns up
+ExecStop=/usr/local/sbin/openflux-netns down
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
