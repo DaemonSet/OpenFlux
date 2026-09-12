@@ -125,11 +125,17 @@ netns veth: of-ns
 subnet:     10.203.0.0/30
 host IP:    10.203.0.1
 netns IP:   10.203.0.2
-WAN:        ens3
 ```
 
-If the server's public interface is not `ens3`, change `WAN_IF` in
-`openflux-netns` before installing it.
+`openflux-netns` automatically detects the interface used by the default IPv4
+route. To override it explicitly, create `/etc/default/openflux`:
+
+```text
+WAN_IF=ens3
+```
+
+The selected WAN interface is stored under `/run/openflux` so that shutdown
+can remove the exact forwarding and NAT rules created during startup.
 
 Install the deployment files:
 
