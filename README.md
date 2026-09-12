@@ -1,11 +1,11 @@
 <div align="center">
   <img src="design/logo/avatar.svg" width="112" alt="OpenFlux logo">
-  <h1>OpenFlux Android</h1>
-  <p>Encrypted document-transport VPN for Android, desktop clients and Linux exit nodes.</p>
+  <h1>OpenFlux</h1>
+  <p>Encrypted multi-client VPN tunnel over Yandex Volga for Android, desktop clients and Linux exit nodes.</p>
   <p>
-    <a href="https://github.com/damnurmum/OpenFlux-Android/releases/latest"><img src="https://img.shields.io/github/v/release/damnurmum/OpenFlux-Android?display_name=tag&amp;sort=semver&amp;style=flat-square&amp;color=7aa2f7" alt="Latest release"></a>
-    <a href="https://github.com/damnurmum/OpenFlux-Android/actions/workflows/ci.yml"><img src="https://github.com/damnurmum/OpenFlux-Android/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
-    <a href="LICENSE"><img src="https://img.shields.io/github/license/damnurmum/OpenFlux-Android?style=flat-square" alt="GPL-3.0 license"></a>
+    <a href="https://github.com/DaemonSet/OpenFlux/releases/latest"><img src="https://img.shields.io/github/v/release/DaemonSet/OpenFlux?display_name=tag&amp;sort=semver&amp;style=flat-square&amp;color=7aa2f7" alt="Latest release"></a>
+    <a href="https://github.com/DaemonSet/OpenFlux/actions/workflows/ci.yml"><img src="https://github.com/DaemonSet/OpenFlux/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/github/license/DaemonSet/OpenFlux?style=flat-square" alt="GPL-3.0 license"></a>
     <img src="https://img.shields.io/badge/Android-8.0%2B-3DDC84?style=flat-square&amp;logo=android&amp;logoColor=white" alt="Android 8 or newer">
   </p>
   <p>
@@ -23,14 +23,15 @@
 > [p1neappleXpress/OpenFlux](https://github.com/p1neappleXpress/OpenFlux).
 > See [FORK.md](FORK.md) for the differences from upstream.
 
-OpenFlux is a research TCP tunnel with pluggable transports. This fork adds an
-Android VPN client and mandatory end-to-end encryption for the Yandex Docs
-transport.
+OpenFlux is an experimental encrypted VPN tunnel built around Yandex Volga as
+its carrier transport. This fork focuses on Android VPN clients and Linux exit
+nodes, with multi-client routing, automatic Volga session recovery and
+end-to-end transport encryption.
 
-**[Download the latest Android release](https://github.com/damnurmum/OpenFlux-Android/releases/latest)**
+**[Download the latest Android release](https://github.com/DaemonSet/OpenFlux/releases/latest)**
 
 ```text
-Android VPN or SOCKS5 client -> encrypted document transport -> Linux exit node -> Internet
+Android VPN or SOCKS5 client -> encrypted Volga transport -> Linux exit node -> Internet
 ```
 
 ## Features
@@ -41,15 +42,16 @@ Android VPN or SOCKS5 client -> encrypted document transport -> Linux exit node 
 - AES-256-GCM authenticated encryption with a key derived using scrypt;
 - Android Keystore-backed storage for the document URL and shared secret;
 - encrypted latency checks and a live ping graph;
-- DNS-over-HTTPS on Android;
+- DNS multiplexing through the exit node with AdGuard DNS filtering and fallback;
 - desktop SOCKS5 client and Linux exit-node modes;
-- Yandex Docs and experimental MAX transport backends.
+- resilient Yandex Volga transport with automatic reconnect and full re-auth;
+- simultaneous multi-client Android sessions over one exit node.
 
 ## Important limitations
 
 OpenFlux is experimental research software, not an audited replacement for
 WireGuard or another mature VPN. The Android tunnel currently supports IPv4 and
-TCP. DNS is handled separately over HTTPS; arbitrary UDP and IPv6 are not
+TCP. DNS is multiplexed through the encrypted tunnel; arbitrary UDP and IPv6 are not
 tunneled. The document provider can still observe metadata such as connection
 times, traffic sizes and encrypted payloads. Anyone with document edit access
 can disrupt the connection.
