@@ -1,11 +1,11 @@
 <div align="center">
   <img src="design/logo/avatar.svg" width="112" alt="Логотип OpenFlux">
-  <h1>OpenFlux Android</h1>
-  <p>Зашифрованный VPN через документ-транспорт для Android, компьютера и выходной Linux-ноды.</p>
+  <h1>OpenFlux</h1>
+  <p>Зашифрованный многоклиентный VPN-туннель через Yandex Volga для Android, компьютера и выходной Linux-ноды.</p>
   <p>
-    <a href="https://github.com/damnurmum/OpenFlux-Android/releases/latest"><img src="https://img.shields.io/github/v/release/damnurmum/OpenFlux-Android?display_name=tag&amp;sort=semver&amp;style=flat-square&amp;color=7aa2f7" alt="Последний релиз"></a>
-    <a href="https://github.com/damnurmum/OpenFlux-Android/actions/workflows/ci.yml"><img src="https://github.com/damnurmum/OpenFlux-Android/actions/workflows/ci.yml/badge.svg" alt="Статус CI"></a>
-    <a href="LICENSE"><img src="https://img.shields.io/github/license/damnurmum/OpenFlux-Android?style=flat-square" alt="Лицензия GPL-3.0"></a>
+    <a href="https://github.com/DaemonSet/OpenFlux/releases/latest"><img src="https://img.shields.io/github/v/release/DaemonSet/OpenFlux?display_name=tag&amp;sort=semver&amp;style=flat-square&amp;color=7aa2f7" alt="Последний релиз"></a>
+    <a href="https://github.com/DaemonSet/OpenFlux/actions/workflows/ci.yml"><img src="https://github.com/DaemonSet/OpenFlux/actions/workflows/ci.yml/badge.svg" alt="Статус CI"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/github/license/DaemonSet/OpenFlux?style=flat-square" alt="Лицензия GPL-3.0"></a>
     <img src="https://img.shields.io/badge/Android-8.0%2B-3DDC84?style=flat-square&amp;logo=android&amp;logoColor=white" alt="Android 8 или новее">
   </p>
   <p>
@@ -23,14 +23,15 @@
 > [p1neappleXpress/OpenFlux](https://github.com/p1neappleXpress/OpenFlux).
 > Основные отличия от исходного проекта перечислены в [FORK.md](FORK.md).
 
-OpenFlux — исследовательский TCP-туннель с подключаемыми транспортами. В этом
-форке добавлены Android VPN-клиент и обязательное сквозное шифрование для
-транспорта через Yandex Docs.
+OpenFlux — экспериментальный зашифрованный VPN-туннель, использующий Yandex
+Volga как транспорт. Основное направление этого форка — Android VPN-клиенты
+и Linux exit-нода с multi-client маршрутизацией, автоматическим восстановлением
+Volga-сессии и сквозным шифрованием.
 
-**[Скачать последнюю Android-версию](https://github.com/damnurmum/OpenFlux-Android/releases/latest)**
+**[Скачать последнюю Android-версию](https://github.com/DaemonSet/OpenFlux/releases/latest)**
 
 ```text
-Android VPN или SOCKS5-клиент -> зашифрованный транспорт -> Linux-нода -> интернет
+Android VPN или SOCKS5-клиент -> зашифрованный Volga-транспорт -> Linux-нода -> интернет
 ```
 
 ## Возможности
@@ -41,16 +42,17 @@ Android VPN или SOCKS5-клиент -> зашифрованный транс�
 - аутентифицированное шифрование AES-256-GCM и получение ключа через scrypt;
 - хранение ссылки и общего секрета с защитой Android Keystore;
 - зашифрованная проверка задержки и живой график пинга;
-- DNS-over-HTTPS на Android;
+- DNSMux через exit-ноду с фильтрацией AdGuard DNS и резервным DNS;
 - SOCKS5-клиент для компьютера и режим выходной Linux-ноды;
-- транспорт через Yandex Docs и экспериментальный транспорт через MAX.
+- устойчивый Yandex Volga transport с reconnect и полным re-auth;
+- одновременная работа нескольких Android-клиентов через одну exit-ноду.
 
 ## Важные ограничения
 
 OpenFlux — экспериментальный исследовательский проект, а не проверенная замена
 WireGuard или другому зрелому VPN. Android-туннель сейчас поддерживает IPv4 и
-TCP. DNS обслуживается отдельно через HTTPS; произвольный UDP и IPv6 через
-туннель не передаются. Владелец транспорта по-прежнему видит метаданные: время
+TCP. DNS передаётся через зашифрованный DNSMux; произвольный UDP и IPv6 через
+туннель пока не передаются. Владелец транспорта по-прежнему видит метаданные: время
 соединения, объём трафика и зашифрованные данные. Пользователь с правом
 редактирования документа может нарушить доступность соединения.
 
