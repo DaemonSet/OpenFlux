@@ -6,8 +6,8 @@ if [[ "${EUID}" -ne 0 ]]; then
     exit 1
 fi
 
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-REPO_ROOT="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 NETNS_SCRIPT="${REPO_ROOT}/deploy/openflux-netns"
 CONFIG_FILE="/run/openflux-test.conf"
 
