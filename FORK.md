@@ -14,9 +14,8 @@ Git repository. Upstream attribution and GPL licensing are preserved.
 
 This fork is focused exclusively on the Yandex Volga transport.
 
-The legacy MAX/OneMe transport and the older Yandex Docs transport are no
-longer part of the project direction and are scheduled for removal from the
-codebase.
+The legacy MAX/OneMe transport and the older pre-Volga Yandex Docs
+transport have been removed. The current codebase is Volga-only.
 
 ## Major changes
 

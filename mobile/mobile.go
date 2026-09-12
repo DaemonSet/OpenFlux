@@ -1,6 +1,6 @@
 // Package mobile exposes the OpenFlux packet transport to Android through
 // gomobile. Android owns the TUN file descriptor; this package only transports
-// complete IPv4 packets through the configured Yandex document.
+// complete IPv4 packets through the encrypted Yandex Volga carrier.
 package mobile
 
 import (
@@ -9,7 +9,6 @@ import (
 	"sync"
 
 	"universal-bypass-tool/transport"
-	"universal-bypass-tool/transport/oneme"
 	"universal-bypass-tool/transport/yandex"
 	"universal-bypass-tool/utils"
 )
@@ -106,73 +105,6 @@ func Start(documentURL, encryptionSecret string) string {
 	client.transport = trans
 	client.encrypted = encrypted
 	client.mu.Unlock()
-	return ""
-}
-
-// StartMax connects OpenFlux through the MAX/OneMe transport.
-// maxUID is the Calls external user ID of the exit-node account.
-func StartMax(maxToken string, maxUID int64) string {
-	maxToken = strings.TrimSpace(maxToken)
-	if maxToken == "" {
-		return "MAX token не указан"
-	}
-	if maxUID <= 0 {
-		return "Некорректный MAX exit UID"
-	}
-
-	client.mu.Lock()
-	if client.running {
-		client.mu.Unlock()
-		return ""
-	}
-	client.running = true
-	client.transport = nil
-	client.encrypted = nil
-	client.packets = nil
-	client.logs = nil
-	client.mu.Unlock()
-
-	utils.EnableDebug()
-	utils.SetLogSink(appendLog)
-	appendLog(fmt.Sprintf("[ANDROID] Запуск транспорта MAX -> %d", maxUID))
-
-	config := transport.DefaultConfig()
-	trans := transport.NewCompressedTransport(
-		oneme.NewOneMeTransport(false, maxToken, maxUID, config),
-	)
-
-	trans = transport.NewDNSMuxTransport(trans, false)
-	trans.Receive(func(data []byte) {
-		packet := append([]byte(nil), data...)
-
-		client.mu.Lock()
-		defer client.mu.Unlock()
-
-		if !client.running {
-			return
-		}
-		if len(client.packets) >= config.MaxQueueSize {
-			client.packets = client.packets[1:]
-		}
-		client.packets = append(client.packets, packet)
-	})
-
-	if err := trans.Start(); err != nil {
-		appendLog(fmt.Sprintf("[ANDROID] Ошибка запуска MAX: %v", err))
-
-		client.mu.Lock()
-		client.running = false
-		client.transport = nil
-		client.mu.Unlock()
-
-		return err.Error()
-	}
-
-	client.mu.Lock()
-	client.transport = trans
-	client.encrypted = nil
-	client.mu.Unlock()
-
 	return ""
 }
 

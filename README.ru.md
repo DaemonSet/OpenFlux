@@ -65,8 +65,7 @@ TCP. DNS передаётся через зашифрованный DNSMux; пр
 - Linux VPS/VDS с root-доступом для выходной ноды;
 - для сборки Android: Java 17, Android SDK/API 35, Build Tools 35.0.0,
   NDK 27.0.12077973, Gradle 8.14.3 и `gomobile`;
-- редактируемый документ в старом редакторе Yandex Docs при использовании
-  транспорта Yandex.
+- ссылка на документ Yandex, поддерживаемый текущим Volga bootstrap.
 
 ## Подготовка приватной конфигурации
 
@@ -89,33 +88,27 @@ chmod 600 document-url encryption-key
 go build -o openflux .
 ```
 
-Запустите выходную Linux-ноду от root:
+Выходная Linux-нода использует raw TCP и должна работать внутри отдельного
+network namespace. Не устанавливайте глобальное правило TCP RST DROP на VPS.
+
+Проверенная схема развёртывания описана в
+[deploy/README.md](deploy/README.md).
+
+Сам Volga-only exit-процесс запускается так:
 
 ```bash
-sudo iptables -C OUTPUT -p tcp --tcp-flags RST RST -j DROP 2>/dev/null || \
-  sudo iptables -I OUTPUT 1 -p tcp --tcp-flags RST RST -j DROP
-sudo ./openflux --exit-node --transport yandex \
-  --url-file ./document-url --encryption-key-file ./encryption-key
-```
-
-Пример [systemd-сервиса](deploy/openflux.service) ожидает бинарник и приватные
-файлы в `/root/openflux`. Перед установкой проверьте пути:
-
-```bash
-sudo install -d -m 700 /root/openflux
-sudo install -m 755 ./openflux /root/openflux/openflux
-sudo install -m 600 ./document-url ./encryption-key /root/openflux/
-sudo install -m 644 deploy/openflux.service /etc/systemd/system/openflux.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now openflux
-sudo systemctl status openflux
+sudo ip netns exec openflux \
+  ./openflux \
+  --exit-node \
+  --url-file ./document-url \
+  --encryption-key-file ./encryption-key
 ```
 
 Запустите клиент компьютера и настройте в браузере SOCKS5-прокси
 `127.0.0.1:1080`:
 
 ```bash
-./openflux --client --transport yandex --socks5 127.0.0.1:1080 \
+./openflux --client --socks5 127.0.0.1:1080 \
   --url-file ./document-url --encryption-key-file ./encryption-key
 ```
 
@@ -155,12 +148,9 @@ CI подписаны debug-ключом, а APK в GitHub Releases — пост
 | `--client` | выкл. | Запустить SOCKS5-клиент |
 | `--exit-node` | выкл. | Запустить выходную ноду (нужен root) |
 | `--socks5` | `:1080` | Адрес SOCKS5-прокси |
-| `--transport` | `yandex` | Транспорт (`yandex` или `oneme`) |
-| `--url` | пусто | Ссылка в аргументе; безопаснее `--url-file` |
+| `--url` | пусто | Ссылка на документ Yandex; безопаснее `--url-file` |
 | `--url-file` | пусто | Прочитать ссылку на документ из файла |
-| `--encryption-key-file` | пусто | Прочитать секрет транспорта Yandex из файла |
-| `--maxToken` | пусто | Токен транспорта MAX |
-| `--maxUid` | пусто | ID пользователя транспорта MAX |
+| `--encryption-key-file` | пусто | Прочитать секрет шифрования транспорта из файла |
 | `--debug` | выкл. | Включить подробные логи |
 
 ## Разработка и безопасность

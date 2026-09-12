@@ -4,6 +4,21 @@ All notable changes to this fork are documented here.
 
 ## Unreleased
 
+### Changed
+
+- OpenFlux runtime is now Volga-only;
+- transport selection has been removed from the command-line interface;
+- Linux exit-node deployment now requires namespace-local TCP RST handling.
+
+### Removed
+
+- legacy MAX/OneMe transport;
+- legacy pre-Volga Yandex Docs transport;
+- obsolete MAX Android bridge code;
+- WebRTC dependency tree used only by MAX/OneMe;
+- unsafe sample systemd unit with host-wide TCP RST suppression.
+
+
 ## 1.0.0 - 2026-09-12
 
 ### Added

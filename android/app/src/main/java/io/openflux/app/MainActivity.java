@@ -785,14 +785,6 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private boolean isValidMaxUid(String value) {
-        if (value == null || value.trim().isEmpty()) return false;
-        try {
-            return Long.parseLong(value.trim()) > 0;
-        } catch (NumberFormatException ignored) {
-            return false;
-        }
-    }
 
     private void appendLog(String value) {
         if (!logs.isEmpty()) logs += "\n";

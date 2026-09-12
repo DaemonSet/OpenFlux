@@ -65,8 +65,7 @@ test.
 - a Linux VPS/VDS with root access for the exit node;
 - for Android builds: Java 17, Android SDK/API 35, Build Tools 35.0.0,
   NDK 27.0.12077973, Gradle 8.14.3 and `gomobile`;
-- an editable document opened with the legacy Yandex Docs editor when using
-  the Yandex transport.
+- a Yandex document URL supported by the current Volga bootstrap flow.
 
 ## Prepare the private configuration
 
@@ -89,33 +88,26 @@ secret if either is exposed.
 go build -o openflux .
 ```
 
-Run the Linux exit node as root:
+The Linux exit node uses raw TCP packets and must run inside an isolated
+network namespace. Do not install a host-wide TCP RST DROP rule.
+
+See [deploy/README.md](deploy/README.md) for the tested deployment layout.
+
+The Volga-only exit process itself is started as:
 
 ```bash
-sudo iptables -C OUTPUT -p tcp --tcp-flags RST RST -j DROP 2>/dev/null || \
-  sudo iptables -I OUTPUT 1 -p tcp --tcp-flags RST RST -j DROP
-sudo ./openflux --exit-node --transport yandex \
-  --url-file ./document-url --encryption-key-file ./encryption-key
-```
-
-The sample [systemd unit](deploy/openflux.service) expects the binary and
-private files in `/root/openflux`. Review its paths before installing it:
-
-```bash
-sudo install -d -m 700 /root/openflux
-sudo install -m 755 ./openflux /root/openflux/openflux
-sudo install -m 600 ./document-url ./encryption-key /root/openflux/
-sudo install -m 644 deploy/openflux.service /etc/systemd/system/openflux.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now openflux
-sudo systemctl status openflux
+sudo ip netns exec openflux \
+  ./openflux \
+  --exit-node \
+  --url-file ./document-url \
+  --encryption-key-file ./encryption-key
 ```
 
 Run the desktop client and configure the browser to use SOCKS5 at
 `127.0.0.1:1080`:
 
 ```bash
-./openflux --client --transport yandex --socks5 127.0.0.1:1080 \
+./openflux --client --socks5 127.0.0.1:1080 \
   --url-file ./document-url --encryption-key-file ./encryption-key
 ```
 
@@ -157,12 +149,9 @@ See [android/README.md](android/README.md) for Android-specific details.
 | `--client` | off | Run the SOCKS5 client |
 | `--exit-node` | off | Run the exit node (requires root) |
 | `--socks5` | `:1080` | SOCKS5 listen address |
-| `--transport` | `yandex` | Transport backend (`yandex` or `oneme`) |
-| `--url` | empty | Inline document URL; prefer `--url-file` |
+| `--url` | empty | Inline Yandex document URL; prefer `--url-file` |
 | `--url-file` | empty | Read the document URL from a file |
-| `--encryption-key-file` | empty | Read the Yandex transport secret from a file |
-| `--maxToken` | empty | MAX transport token |
-| `--maxUid` | empty | MAX transport user ID |
+| `--encryption-key-file` | empty | Read the transport encryption secret from a file |
 | `--debug` | off | Enable verbose logging |
 
 ## Development and security
