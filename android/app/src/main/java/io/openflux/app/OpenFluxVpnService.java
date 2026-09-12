@@ -120,7 +120,7 @@ public final class OpenFluxVpnService extends VpnService {
                     .addAddress("10.10.10.2", 24)
                     .addRoute("0.0.0.0", 0)
                     .addDnsServer(dnsServer);
-            // MAX control/signaling connections are opened by Go inside this
+            // Volga control/signaling connections are opened by Go inside this
             // process. Keep the app itself outside its own TUN to avoid recursion.
             builder.addDisallowedApplication(getPackageName());
             ParcelFileDescriptor established = builder.establish();

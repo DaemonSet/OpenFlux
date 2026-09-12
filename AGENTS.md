@@ -1,105 +1,82 @@
-# OpenFlux MAX debugging environment
+# OpenFlux contributor notes
 
-You are working directly on a dedicated Ubuntu 22.04 VPS as root.
+## Project direction
 
-Goal:
-Make OpenFlux MAX/OneMe transport work end-to-end:
-SOCKS5 client -> MAX transport -> exit node -> Internet.
+OpenFlux is now Volga-only.
 
-Repository:
-- /root/OpenFlux-Android
+Do not reintroduce:
 
-Runtime/build directory:
-- /root/openflux
+- MAX / OneMe transport;
+- legacy pre-Volga Yandex Docs transport;
+- host-wide TCP RST suppression.
 
-Sensitive credentials:
-- /root/openflux/max-exit-token
-- /root/openflux/max-client-token
+## Current transport stack
 
-NEVER print, cat, log, echo, commit, or expose token contents.
+```text
+Application / Android TUN
+        |
+      DNSMux
+        |
+ multi-client OFM2
+        |
+    compression
+        |
+   AES-256-GCM
+        |
+ resilient Yandex Volga
+```
 
-Other services exist on this VPS:
-- Amnezia
-- Xray
-- Docker
-- Dante
-- SSH
+## Android
 
-Do not modify or stop unrelated services.
+The Android client currently tunnels IPv4/TCP.
 
-Testing:
-- Exit-node account token: /root/openflux/max-exit-token
-- Client account token: /root/openflux/max-client-token
-- SOCKS test listener: 127.0.0.1:1081
-- VPS public IP expected through tunnel: 213.218.212.12
+DNS packets are intercepted by `VpnService` and forwarded through DNSMux to the
+exit node.
 
-The exit node requires:
-iptables OUTPUT TCP RST DROP while testing raw TCP.
+General UDP/QUIC and IPv6 are not implemented yet.
 
-Do not persist firewall changes without explicit approval.
+## Linux exit node
 
-Current MAX debugging state:
-- MAX WebSocket connection/login works for both accounts.
-- opcode 78 is used to initiate calls.
-- Current failure returned by MAX:
-  rejectedParticipants:
-  errorCode = privacy.violation
-- We passed --maxUid 430846376, obtained from browser localStorage viewerId.
-- MAX returned rejected participant id 441226311.
-- Therefore viewerId may not equal profile.contact.id used by calls.
-- First determine profile.contact.id returned by opcode 19 for both accounts.
-- Do not assume either ID is correct until verified.
+The raw TCP exit should run inside a dedicated Linux network namespace.
 
-Relevant files:
-- transport/oneme/max_wclient.go
-- transport/oneme/max_call.go
-- transport/oneme/max_transport.go
+TCP RST suppression must be namespace-local.
 
-Known code quality problems:
-- OneMeTransport.Start ignores Connect/LoginByToken errors.
-- opcode 78 response validation was originally missing.
-- Transport is experimental.
+Never add a host-wide rule such as:
 
-Build:
-go build -o /root/openflux/openflux-debug .
+```bash
+iptables -A OUTPUT -p tcp --tcp-flags RST RST -j DROP
+```
 
-Use tmux for end-to-end testing.
-There are dedicated panes for exit node and client.
-You may use tmux send-keys and capture-pane to control/read them.
+## Production safety
 
-Work iteratively:
-inspect -> patch -> gofmt -> build -> run -> inspect logs -> fix.
+Treat existing host networking and unrelated services as out of scope.
 
-Do not merely suggest patches to the user when you can safely apply and test them yourself.
-Explain significant findings and avoid unrelated refactors.
+Before changing a production host:
 
-## CRITICAL VPS SAFETY RULES
+- prefer read-only inspection first;
+- do not stop, restart or reconfigure unrelated services;
+- do not apply broad firewall, routing, interface, DNS or sysctl changes;
+- keep OpenFlux-specific network and firewall changes inside its dedicated
+  network namespace whenever possible;
+- never print, log or commit document URLs, encryption secrets or other
+  credentials;
+- require explicit operator approval before making unrelated host-level
+  changes.
 
-This VPS contains production/important unrelated networking services.
+## Development checks
 
-DO NOT:
-- stop, restart, modify, remove, inspect credentials of, or reconfigure Docker containers
-- modify Amnezia VPN, Xray, AWG, Dante, dnstt, SSH
-- run docker, docker compose, systemctl, service, nft, ufw
-- modify routes, addresses, interfaces, sysctls, DNS configuration, or forwarding
-- touch amn0, docker0, ens3
-- kill processes unless they are OpenFlux processes started by you
-- modify files under /etc or unrelated application directories
-- flush, replace, or reorder firewall rules
-- use iptables-save/restore to apply changes
+Before committing Go changes:
 
-The ONLY firewall mutation allowed for OpenFlux testing is exactly:
-iptables -C OUTPUT -p tcp --tcp-flags RST RST -j DROP 2>/dev/null || iptables -I OUTPUT 1 -p tcp --tcp-flags RST RST -j DROP
+```bash
+gofmt -w $(git ls-files '*.go')
+go test ./...
+go vet ./...
+(cd mobile && go test ./...)
+git diff --check
+```
 
-And when cleanup is needed, only:
-iptables -D OUTPUT -p tcp --tcp-flags RST RST -j DROP
+For Android-related changes also build the debug APK:
 
-Before any other system/network/firewall change, STOP and ask the user for approval.
-
-Ports/services that must remain untouched include:
-- UDP 53: dnstt
-- TCP/UDP 443: Amnezia Xray
-- UDP 46876: Amnezia AWG
-- TCP 1080: Dante
-
-Only OpenFlux port 1081 is available for the client test.
+```bash
+BUILD_TYPE=debug ./build_android_app.sh
+```
