@@ -7,116 +7,287 @@ NS_IF="of-ns"
 
 HOST_ADDR="10.203.0.1/30"
 NS_ADDR="10.203.0.2/30"
+HOST_IP="10.203.0.1"
 NS_IP="10.203.0.2"
 SUBNET="10.203.0.0/30"
 
-WAN_IF="ens3"
+CONFIG_FILE="${OPENFLUX_CONFIG:-/etc/default/openflux}"
+STATE_DIR="/run/openflux"
+STATE_FILE="${STATE_DIR}/netns-wan-if"
 
-up() {
+die() {
+    echo "openflux-netns: $*" >&2
+    exit 1
+}
+
+require_commands() {
+    local cmd
+
+    for cmd in ip iptables awk grep install cat mkdir rm; do
+        command -v "${cmd}" >/dev/null 2>&1 || \
+            die "required command not found: ${cmd}"
+    done
+}
+
+load_config() {
+    if [[ -r "${CONFIG_FILE}" ]]; then
+        # shellcheck disable=SC1090
+        source "${CONFIG_FILE}"
+    fi
+}
+
+detect_default_wan() {
+    ip -4 route show default |
+        awk '
+            /default/ {
+                for (i = 1; i <= NF; i++) {
+                    if ($i == "dev" && (i + 1) <= NF) {
+                        print $(i + 1)
+                        exit
+                    }
+                }
+            }
+        '
+}
+
+resolve_wan_if() {
+    local wan
+
+    load_config
+
+    wan="${WAN_IF:-}"
+
+    if [[ -z "${wan}" ]]; then
+        wan="$(detect_default_wan)"
+    fi
+
+    [[ -n "${wan}" ]] || \
+        die "unable to determine WAN interface; set WAN_IF in ${CONFIG_FILE}"
+
+    printf '%s\n' "${wan}"
+}
+
+ns_exists() {
+    ip netns list |
+        awk '{print $1}' |
+        grep -qx "${NS}"
+}
+
+host_if_exists() {
+    ip link show dev "${HOST_IF}" >/dev/null 2>&1
+}
+
+ns_if_exists() {
+    ns_exists &&
+        ip netns exec "${NS}" \
+            ip link show dev "${NS_IF}" >/dev/null 2>&1
+}
+
+write_wan_state() {
+    local wan="$1"
+
+    install -d -m 0755 "${STATE_DIR}"
+    printf '%s\n' "${wan}" >"${STATE_FILE}"
+}
+
+read_wan_state() {
+    if [[ -s "${STATE_FILE}" ]]; then
+        cat "${STATE_FILE}"
+        return 0
+    fi
+
+    return 1
+}
+
+repair_partial_topology() {
+    if ns_exists; then
+        if ! host_if_exists || ! ns_if_exists; then
+            echo "openflux-netns: repairing incomplete network namespace"
+
+            ip netns del "${NS}" 2>/dev/null || true
+            ip link del "${HOST_IF}" 2>/dev/null || true
+        fi
+    elif host_if_exists; then
+        echo "openflux-netns: removing orphaned ${HOST_IF}"
+        ip link del "${HOST_IF}"
+    fi
+}
+
+ensure_topology() {
+    repair_partial_topology
+
+    if ! ns_exists; then
+        ip netns add "${NS}"
+
+        ip link add "${HOST_IF}" \
+            type veth \
+            peer name "${NS_IF}"
+
+        ip link set "${NS_IF}" netns "${NS}"
+    fi
+
+    ip addr replace "${HOST_ADDR}" dev "${HOST_IF}"
+    ip link set "${HOST_IF}" up
+
+    ip netns exec "${NS}" \
+        ip link set lo up
+
+    ip netns exec "${NS}" \
+        ip addr replace "${NS_ADDR}" dev "${NS_IF}"
+
+    ip netns exec "${NS}" \
+        ip link set "${NS_IF}" up
+
+    ip netns exec "${NS}" \
+        ip route replace default \
+        via "${HOST_IP}" \
+        dev "${NS_IF}"
+}
+
+write_namespace_resolv_conf() {
     mkdir -p "/etc/netns/${NS}"
 
     cat >"/etc/netns/${NS}/resolv.conf" <<DNS
 nameserver 1.1.1.1
 nameserver 8.8.8.8
 DNS
+}
 
-    if ! ip netns list | awk '{print $1}' | grep -qx "${NS}"; then
-        ip netns add "${NS}"
+ensure_firewall() {
+    local wan="$1"
 
-        ip link add "${HOST_IF}" type veth peer name "${NS_IF}"
-        ip link set "${NS_IF}" netns "${NS}"
-
-        ip addr add "${HOST_ADDR}" dev "${HOST_IF}"
-        ip link set "${HOST_IF}" up
-
-        ip netns exec "${NS}" ip link set lo up
-        ip netns exec "${NS}" ip addr add "${NS_ADDR}" dev "${NS_IF}"
-        ip netns exec "${NS}" ip link set "${NS_IF}" up
-        ip netns exec "${NS}" ip route add default via 10.203.0.1
-    fi
-
-    iptables -C FORWARD \
-        -i "${HOST_IF}" -o "${WAN_IF}" \
+    iptables -w 5 -C FORWARD \
+        -i "${HOST_IF}" -o "${wan}" \
         -s "${NS_IP}/32" \
         -j ACCEPT 2>/dev/null || \
-    iptables -I FORWARD 1 \
-        -i "${HOST_IF}" -o "${WAN_IF}" \
+    iptables -w 5 -I FORWARD 1 \
+        -i "${HOST_IF}" -o "${wan}" \
         -s "${NS_IP}/32" \
         -j ACCEPT
 
-    iptables -C FORWARD \
-        -i "${WAN_IF}" -o "${HOST_IF}" \
+    iptables -w 5 -C FORWARD \
+        -i "${wan}" -o "${HOST_IF}" \
         -d "${NS_IP}/32" \
         -m conntrack --ctstate ESTABLISHED,RELATED \
         -j ACCEPT 2>/dev/null || \
-    iptables -I FORWARD 1 \
-        -i "${WAN_IF}" -o "${HOST_IF}" \
+    iptables -w 5 -I FORWARD 1 \
+        -i "${wan}" -o "${HOST_IF}" \
         -d "${NS_IP}/32" \
         -m conntrack --ctstate ESTABLISHED,RELATED \
         -j ACCEPT
 
-    iptables -t nat -C POSTROUTING \
+    iptables -w 5 -t nat -C POSTROUTING \
         -s "${SUBNET}" \
-        -o "${WAN_IF}" \
+        -o "${wan}" \
         -j MASQUERADE 2>/dev/null || \
-    iptables -t nat -I POSTROUTING 1 \
+    iptables -w 5 -t nat -I POSTROUTING 1 \
         -s "${SUBNET}" \
-        -o "${WAN_IF}" \
+        -o "${wan}" \
         -j MASQUERADE
 
     ip netns exec "${NS}" \
-        iptables -C OUTPUT \
+        iptables -w 5 -C OUTPUT \
         -p tcp \
         --tcp-flags RST RST \
         -j DROP 2>/dev/null || \
     ip netns exec "${NS}" \
-        iptables -A OUTPUT \
+        iptables -w 5 -A OUTPUT \
         -p tcp \
         --tcp-flags RST RST \
         -j DROP
 }
 
-down() {
-    while iptables -C FORWARD \
-        -i "${HOST_IF}" -o "${WAN_IF}" \
+remove_firewall() {
+    local wan="$1"
+
+    while iptables -w 5 -C FORWARD \
+        -i "${HOST_IF}" -o "${wan}" \
         -s "${NS_IP}/32" \
         -j ACCEPT 2>/dev/null
     do
-        iptables -D FORWARD \
-            -i "${HOST_IF}" -o "${WAN_IF}" \
+        iptables -w 5 -D FORWARD \
+            -i "${HOST_IF}" -o "${wan}" \
             -s "${NS_IP}/32" \
             -j ACCEPT
     done
 
-    while iptables -C FORWARD \
-        -i "${WAN_IF}" -o "${HOST_IF}" \
+    while iptables -w 5 -C FORWARD \
+        -i "${wan}" -o "${HOST_IF}" \
         -d "${NS_IP}/32" \
         -m conntrack --ctstate ESTABLISHED,RELATED \
         -j ACCEPT 2>/dev/null
     do
-        iptables -D FORWARD \
-            -i "${WAN_IF}" -o "${HOST_IF}" \
+        iptables -w 5 -D FORWARD \
+            -i "${wan}" -o "${HOST_IF}" \
             -d "${NS_IP}/32" \
             -m conntrack --ctstate ESTABLISHED,RELATED \
             -j ACCEPT
     done
 
-    while iptables -t nat -C POSTROUTING \
+    while iptables -w 5 -t nat -C POSTROUTING \
         -s "${SUBNET}" \
-        -o "${WAN_IF}" \
+        -o "${wan}" \
         -j MASQUERADE 2>/dev/null
     do
-        iptables -t nat -D POSTROUTING \
+        iptables -w 5 -t nat -D POSTROUTING \
             -s "${SUBNET}" \
-            -o "${WAN_IF}" \
+            -o "${wan}" \
             -j MASQUERADE
     done
+}
 
-    if ip netns list | awk '{print $1}' | grep -qx "${NS}"; then
+up() {
+    local wan
+    local previous_wan=""
+
+    require_commands
+
+    wan="$(resolve_wan_if)"
+
+    ip link show dev "${wan}" >/dev/null 2>&1 || \
+        die "WAN interface does not exist: ${wan}"
+
+    if previous_wan="$(read_wan_state 2>/dev/null)"; then
+        if [[ -n "${previous_wan}" && "${previous_wan}" != "${wan}" ]]; then
+            echo "openflux-netns: WAN changed: ${previous_wan} -> ${wan}"
+            remove_firewall "${previous_wan}"
+        fi
+    fi
+
+    write_wan_state "${wan}"
+    write_namespace_resolv_conf
+    ensure_topology
+    ensure_firewall "${wan}"
+
+    echo "openflux-netns: namespace ready; WAN=${wan}"
+}
+
+down() {
+    local wan=""
+
+    require_commands
+
+    if wan="$(read_wan_state)"; then
+        :
+    else
+        wan="$(resolve_wan_if 2>/dev/null || true)"
+    fi
+
+    if [[ -n "${wan}" ]]; then
+        remove_firewall "${wan}"
+    else
+        echo "openflux-netns: warning: WAN interface unknown; skipping host firewall cleanup" >&2
+    fi
+
+    if ns_exists; then
         ip netns del "${NS}"
     fi
 
     ip link del "${HOST_IF}" 2>/dev/null || true
+
+    rm -f "${STATE_FILE}"
+
+    echo "openflux-netns: namespace removed"
 }
 
 case "${1:-}" in

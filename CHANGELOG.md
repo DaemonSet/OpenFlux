@@ -14,6 +14,8 @@ All notable changes to this fork are documented here.
 - OpenFlux runtime is now Volga-only;
 - transport selection has been removed from the command-line interface;
 - Linux exit-node deployment now requires namespace-local TCP RST handling.
+- exit-node namespace provisioning now auto-detects the WAN interface, cleans
+  up rules using persisted runtime state and repairs incomplete veth topology.
 
 ### Removed
 
