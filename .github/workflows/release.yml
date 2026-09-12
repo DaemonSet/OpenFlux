@@ -9,7 +9,7 @@ on:
       tag:
         description: Existing Git tag to publish
         required: true
-        default: v0.3.0
+        default: v2.0.0-beta.1
 
 env:
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
@@ -23,6 +23,43 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Validate release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "$RELEASE_TAG" in
+            v*) ;;
+            *)
+              echo "Release tag must start with v: $RELEASE_TAG"
+              exit 1
+              ;;
+          esac
+
+          expected_version="${RELEASE_TAG#v}"
+          actual_version="$(
+            sed -n 's/^[[:space:]]*versionName[[:space:]]*"\([^"]*\)".*/\1/p'               android/app/build.gradle
+          )"
+
+          if [ -z "$actual_version" ]; then
+            echo "Could not read Android versionName"
+            exit 1
+          fi
+
+          if [ "$actual_version" != "$expected_version" ]; then
+            echo "Tag/version mismatch:"
+            echo "  tag:         $RELEASE_TAG"
+            echo "  expected:    $expected_version"
+            echo "  versionName: $actual_version"
+            exit 1
+          fi
+
+          echo "Release tag: $RELEASE_TAG"
+          echo "Android versionName: $actual_version"
+          echo "Commit: $(git rev-parse HEAD)"
 
       - uses: actions/setup-go@v5
         with:
