@@ -1,0 +1,20 @@
+[Unit]
+Description=OpenFlux Yandex Volga Exit Node
+Requires=openflux-netns.service
+BindsTo=openflux-netns.service
+After=network-online.target openflux-netns.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/openflux-exit
+ExecStart=/usr/bin/ip netns exec openflux \
+    /opt/openflux-exit/openflux-exit \
+    --exit-node \
+    --url-file /opt/openflux-exit/document-url.txt \
+    --encryption-key-file /opt/openflux-exit/encryption-secret.txt
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

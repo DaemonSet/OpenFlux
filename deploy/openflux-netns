@@ -1,0 +1,137 @@
+#!/bin/bash
+set -euo pipefail
+
+NS="openflux"
+HOST_IF="of-host"
+NS_IF="of-ns"
+
+HOST_ADDR="10.203.0.1/30"
+NS_ADDR="10.203.0.2/30"
+NS_IP="10.203.0.2"
+SUBNET="10.203.0.0/30"
+
+WAN_IF="ens3"
+
+up() {
+    mkdir -p "/etc/netns/${NS}"
+
+    cat >"/etc/netns/${NS}/resolv.conf" <<DNS
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+DNS
+
+    if ! ip netns list | awk '{print $1}' | grep -qx "${NS}"; then
+        ip netns add "${NS}"
+
+        ip link add "${HOST_IF}" type veth peer name "${NS_IF}"
+        ip link set "${NS_IF}" netns "${NS}"
+
+        ip addr add "${HOST_ADDR}" dev "${HOST_IF}"
+        ip link set "${HOST_IF}" up
+
+        ip netns exec "${NS}" ip link set lo up
+        ip netns exec "${NS}" ip addr add "${NS_ADDR}" dev "${NS_IF}"
+        ip netns exec "${NS}" ip link set "${NS_IF}" up
+        ip netns exec "${NS}" ip route add default via 10.203.0.1
+    fi
+
+    iptables -C FORWARD \
+        -i "${HOST_IF}" -o "${WAN_IF}" \
+        -s "${NS_IP}/32" \
+        -j ACCEPT 2>/dev/null || \
+    iptables -I FORWARD 1 \
+        -i "${HOST_IF}" -o "${WAN_IF}" \
+        -s "${NS_IP}/32" \
+        -j ACCEPT
+
+    iptables -C FORWARD \
+        -i "${WAN_IF}" -o "${HOST_IF}" \
+        -d "${NS_IP}/32" \
+        -m conntrack --ctstate ESTABLISHED,RELATED \
+        -j ACCEPT 2>/dev/null || \
+    iptables -I FORWARD 1 \
+        -i "${WAN_IF}" -o "${HOST_IF}" \
+        -d "${NS_IP}/32" \
+        -m conntrack --ctstate ESTABLISHED,RELATED \
+        -j ACCEPT
+
+    iptables -t nat -C POSTROUTING \
+        -s "${SUBNET}" \
+        -o "${WAN_IF}" \
+        -j MASQUERADE 2>/dev/null || \
+    iptables -t nat -I POSTROUTING 1 \
+        -s "${SUBNET}" \
+        -o "${WAN_IF}" \
+        -j MASQUERADE
+
+    ip netns exec "${NS}" \
+        iptables -C OUTPUT \
+        -p tcp \
+        --tcp-flags RST RST \
+        -j DROP 2>/dev/null || \
+    ip netns exec "${NS}" \
+        iptables -A OUTPUT \
+        -p tcp \
+        --tcp-flags RST RST \
+        -j DROP
+}
+
+down() {
+    while iptables -C FORWARD \
+        -i "${HOST_IF}" -o "${WAN_IF}" \
+        -s "${NS_IP}/32" \
+        -j ACCEPT 2>/dev/null
+    do
+        iptables -D FORWARD \
+            -i "${HOST_IF}" -o "${WAN_IF}" \
+            -s "${NS_IP}/32" \
+            -j ACCEPT
+    done
+
+    while iptables -C FORWARD \
+        -i "${WAN_IF}" -o "${HOST_IF}" \
+        -d "${NS_IP}/32" \
+        -m conntrack --ctstate ESTABLISHED,RELATED \
+        -j ACCEPT 2>/dev/null
+    do
+        iptables -D FORWARD \
+            -i "${WAN_IF}" -o "${HOST_IF}" \
+            -d "${NS_IP}/32" \
+            -m conntrack --ctstate ESTABLISHED,RELATED \
+            -j ACCEPT
+    done
+
+    while iptables -t nat -C POSTROUTING \
+        -s "${SUBNET}" \
+        -o "${WAN_IF}" \
+        -j MASQUERADE 2>/dev/null
+    do
+        iptables -t nat -D POSTROUTING \
+            -s "${SUBNET}" \
+            -o "${WAN_IF}" \
+            -j MASQUERADE
+    done
+
+    if ip netns list | awk '{print $1}' | grep -qx "${NS}"; then
+        ip netns del "${NS}"
+    fi
+
+    ip link del "${HOST_IF}" 2>/dev/null || true
+}
+
+case "${1:-}" in
+    up)
+        up
+        ;;
+    down)
+        down
+        ;;
+    restart)
+        down
+        up
+        ;;
+    *)
+        echo "usage: $0 {up|down|restart}" >&2
+        exit 2
+        ;;
+esac
