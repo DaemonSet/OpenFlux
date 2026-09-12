@@ -766,6 +766,9 @@ type volgaWS struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
+	connMu sync.Mutex
+	conn   *websocket.Conn
+
 	readyOnce sync.Once
 	ready     chan struct{}
 }
@@ -792,6 +795,18 @@ func (w *volgaWS) Start() {
 
 func (w *volgaWS) Stop() {
 	w.cancel()
+
+	// ReadMessage is not context-aware once the websocket is established.
+	// Closing the live socket makes shutdown immediate instead of waiting for
+	// WSReadTimeout.
+	w.connMu.Lock()
+	conn := w.conn
+	w.conn = nil
+	w.connMu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
+
 	w.wg.Wait()
 }
 
@@ -870,7 +885,24 @@ func (w *volgaWS) connect() error {
 		}
 		return fmt.Errorf("dial: %w", err)
 	}
-	defer conn.Close()
+
+	w.connMu.Lock()
+	if w.ctx.Err() != nil {
+		w.connMu.Unlock()
+		_ = conn.Close()
+		return w.ctx.Err()
+	}
+	w.conn = conn
+	w.connMu.Unlock()
+
+	defer func() {
+		w.connMu.Lock()
+		if w.conn == conn {
+			w.conn = nil
+		}
+		w.connMu.Unlock()
+		_ = conn.Close()
+	}()
 
 	utils.Debugf("[VOLGA] Xiva websocket connected user=%s", w.auth.userIDStr)
 	if w.onState != nil {

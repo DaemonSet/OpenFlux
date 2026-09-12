@@ -56,7 +56,8 @@ type ResilientYandexVolgaTransport struct {
 	reconnectMaxDelay time.Duration
 	reconnectFactor   float64
 
-	reconnects atomic.Uint64
+	forceReconnect chan string
+	reconnects     atomic.Uint64
 }
 
 func NewResilientYandexVolgaTransport(docURL string, cfg transport.TransportConfig) *ResilientYandexVolgaTransport {
@@ -76,6 +77,7 @@ func newResilientYandexVolgaTransport(docURL string, cfg transport.TransportConf
 		reconnectMinDelay: 1 * time.Second,
 		reconnectMaxDelay: 30 * time.Second,
 		reconnectFactor:   2,
+		forceReconnect:    make(chan string, 1),
 	}
 }
 
@@ -162,6 +164,25 @@ func (t *ResilientYandexVolgaTransport) Stats() transport.TransportStats {
 	return stats
 }
 
+// ForceReconnect requests a full Volga bootstrap/re-auth cycle even when
+// the underlying websocket still reports itself connected. This is used by
+// end-to-end liveness checks that can detect a logically dead carrier.
+func (t *ResilientYandexVolgaTransport) ForceReconnect(reason string) {
+	if !t.IsRunning() || !t.IsConnected() {
+		return
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "forced reconnect"
+	}
+
+	select {
+	case t.forceReconnect <- reason:
+	default:
+		// A reconnect request is already pending.
+	}
+}
+
 func (t *ResilientYandexVolgaTransport) supervise(ctx context.Context) {
 	defer t.wg.Done()
 	ticker := time.NewTicker(t.healthInterval)
@@ -173,6 +194,9 @@ func (t *ResilientYandexVolgaTransport) supervise(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case reason := <-t.forceReconnect:
+			disconnectedSince = time.Time{}
+			t.recoverSession(ctx, reason)
 		case now := <-ticker.C:
 			t.mu.RLock()
 			inner := t.inner

@@ -4,9 +4,11 @@
 package mobile
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"universal-bypass-tool/transport"
 	"universal-bypass-tool/transport/yandex"
@@ -16,12 +18,14 @@ import (
 var client = packetClient{}
 
 type packetClient struct {
-	mu        sync.Mutex
-	running   bool
-	transport transport.Transport
-	encrypted *transport.EncryptedTransport
-	packets   [][]byte
-	logs      []string
+	mu             sync.Mutex
+	running        bool
+	transport      transport.Transport
+	encrypted      *transport.EncryptedTransport
+	carrier        *yandex.ResilientYandexVolgaTransport
+	watchdogCancel context.CancelFunc
+	packets        [][]byte
+	logs           []string
 }
 
 func appendLog(message string) {
@@ -59,8 +63,9 @@ func Start(documentURL, encryptionSecret string) string {
 	appendLog("[ANDROID] Запуск транспорта Yandex Volga")
 
 	config := transport.DefaultConfig()
+	carrier := yandex.NewResilientYandexVolgaTransport(documentURL, config)
 	encrypted, err := transport.NewEncryptedTransport(
-		yandex.NewResilientYandexVolgaTransport(documentURL, config), encryptionSecret, documentURL, false,
+		carrier, encryptionSecret, documentURL, false,
 	)
 	if err != nil {
 		client.mu.Lock()
@@ -101,24 +106,89 @@ func Start(documentURL, encryptionSecret string) string {
 		return err.Error()
 	}
 
+	watchdogCtx, watchdogCancel := context.WithCancel(context.Background())
+
 	client.mu.Lock()
 	client.transport = trans
 	client.encrypted = encrypted
+	client.carrier = carrier
+	client.watchdogCancel = watchdogCancel
 	client.mu.Unlock()
+
+	go superviseLiveness(watchdogCtx, encrypted, carrier)
 	return ""
 }
 
 func Stop() {
 	client.mu.Lock()
 	trans := client.transport
+	cancel := client.watchdogCancel
 	client.running = false
 	client.transport = nil
 	client.encrypted = nil
+	client.carrier = nil
+	client.watchdogCancel = nil
 	client.packets = nil
 	client.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+
 	appendLog("[ANDROID] Остановка транспорта")
 	if trans != nil {
 		_ = trans.Stop()
+	}
+}
+
+const (
+	livenessProbeInterval = 30 * time.Second
+	livenessFailureWindow = 90 * time.Second
+)
+
+func superviseLiveness(
+	ctx context.Context,
+	encrypted *transport.EncryptedTransport,
+	carrier *yandex.ResilientYandexVolgaTransport,
+) {
+	ticker := time.NewTicker(livenessProbeInterval)
+	defer ticker.Stop()
+
+	lastSequence := encrypted.PingSequence()
+	lastPong := time.Now()
+
+	probe := func(now time.Time) {
+		sequence := encrypted.PingSequence()
+		if sequence != lastSequence {
+			lastSequence = sequence
+			lastPong = now
+		}
+
+		if err := encrypted.Ping(); err != nil {
+			appendLog(fmt.Sprintf("[ANDROID] Liveness ping send failed: %v", err))
+		}
+
+		if now.Sub(lastPong) >= livenessFailureWindow {
+			appendLog(fmt.Sprintf(
+				"[ANDROID] Liveness timeout: no encrypted pong for %s; rebuilding Volga session",
+				now.Sub(lastPong).Round(time.Second),
+			))
+			carrier.ForceReconnect("Android end-to-end encrypted ping timeout")
+			// Give the newly requested bootstrap cycle a full health window.
+			lastPong = now
+		}
+	}
+
+	// Do not wait one full interval before establishing the first baseline.
+	probe(time.Now())
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			probe(now)
+		}
 	}
 }
 

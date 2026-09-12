@@ -17,6 +17,7 @@ import java.net.URL;
 import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import io.openflux.bridge.mobile.Mobile;
@@ -38,12 +39,15 @@ public final class OpenFluxVpnService extends VpnService {
     private static volatile String lastError = "";
 
     private final ExecutorService workers = Executors.newCachedThreadPool();
+    private final ExecutorService cleanupWorker = Executors.newSingleThreadExecutor();
     private final Object outputLock = new Object();
     private final AtomicInteger generation = new AtomicInteger();
+    private final AtomicBoolean cleanupScheduled = new AtomicBoolean();
     private volatile boolean active;
-    private ParcelFileDescriptor tunnel;
-    private FileInputStream tunnelInput;
-    private FileOutputStream tunnelOutput;
+    private volatile boolean preserveErrorOnCleanup;
+    private volatile ParcelFileDescriptor tunnel;
+    private volatile FileInputStream tunnelInput;
+    private volatile FileOutputStream tunnelOutput;
 
     public static boolean isRunning() { return running; }
     public static String getStatus() { return status; }
@@ -51,7 +55,7 @@ public final class OpenFluxVpnService extends VpnService {
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {
-            stopVpn();
+            requestStop(false);
             return START_NOT_STICKY;
         }
         if (running) return START_STICKY;
@@ -352,51 +356,77 @@ public final class OpenFluxVpnService extends VpnService {
         bytes[offset + 1] = (byte) value;
     }
 
-    private synchronized void fail(int session, String message) {
+    private void fail(int session, String message) {
         if (!isCurrent(session)) return;
         lastError = message == null ? "Неизвестная ошибка" : message;
         status = "Ошибка";
+        requestStop(true);
+    }
+
+    private void requestStop(boolean preserveError) {
         generation.incrementAndGet();
         active = false;
-        closeTunnel();
-        Mobile.stop();
-        running = false;
+        preserveErrorOnCleanup = preserveError;
+        if (!preserveError) {
+            status = "Останавливается…";
+        }
+
+        scheduleCleanup();
+
+        // These calls are cheap Android lifecycle operations. The potentially
+        // blocking TUN/Go transport shutdown is deliberately off the main thread.
         stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
     }
 
-    private synchronized void stopVpn() {
-        status = "Останавливается…";
-        generation.incrementAndGet();
-        active = false;
-        closeTunnel();
-        Mobile.stop();
-        running = false;
-        status = "Остановлено";
-        lastError = "";
-        stopForeground(STOP_FOREGROUND_REMOVE);
-        stopSelf();
+    private void scheduleCleanup() {
+        if (!cleanupScheduled.compareAndSet(false, true)) return;
+
+        cleanupWorker.execute(() -> {
+            try {
+                closeTunnel();
+                Mobile.stop();
+            } finally {
+                running = false;
+                if (!preserveErrorOnCleanup) {
+                    status = "Остановлено";
+                    lastError = "";
+                }
+            }
+        });
     }
 
     @Override public void onDestroy() {
         generation.incrementAndGet();
         active = false;
-        closeTunnel();
-        Mobile.stop();
-        running = false;
-        if (!"Ошибка".equals(status)) status = "Остановлено";
+        if (running && !"Ошибка".equals(status)) {
+            status = "Останавливается…";
+        }
+
+        scheduleCleanup();
+
         workers.shutdownNow();
+        // shutdown() does not cancel the cleanup task already submitted above.
+        cleanupWorker.shutdown();
         super.onDestroy();
     }
 
     private void closeTunnel() {
+        // Close the descriptor before waiting for outputLock. If a writer is
+        // blocked in FileOutputStream.write(), closing the TUN wakes it instead
+        // of making shutdown wait forever for the same lock.
+        ParcelFileDescriptor currentTunnel = tunnel;
+        FileInputStream currentInput = tunnelInput;
+        FileOutputStream currentOutput = tunnelOutput;
+
+        if (currentTunnel != null) {
+            try { currentTunnel.close(); } catch (IOException ignored) { }
+        }
+
         synchronized (outputLock) {
-            if (tunnel != null) {
-                try { tunnel.close(); } catch (IOException ignored) { }
-                tunnel = null;
-            }
-            tunnelInput = null;
-            tunnelOutput = null;
+            if (tunnel == currentTunnel) tunnel = null;
+            if (tunnelInput == currentInput) tunnelInput = null;
+            if (tunnelOutput == currentOutput) tunnelOutput = null;
         }
     }
 

@@ -138,3 +138,63 @@ func TestResilientVolgaLetsShortDisconnectRecoverInPlace(t *testing.T) {
 		t.Fatal("transport did not return to connected state")
 	}
 }
+
+func TestResilientVolgaForcedReconnectWhileCarrierLooksConnected(t *testing.T) {
+	var mu sync.Mutex
+	var made []*fakeResilientVolgaSession
+	factory := func(string, transport.TransportConfig) resilientVolgaSession {
+		s := &fakeResilientVolgaSession{}
+		mu.Lock()
+		made = append(made, s)
+		mu.Unlock()
+		return s
+	}
+
+	r := newResilientYandexVolgaTransport(
+		"https://example.invalid/doc",
+		transport.DefaultConfig(),
+		factory,
+	)
+	r.healthInterval = 5 * time.Millisecond
+	r.reconnectMinDelay = 1 * time.Millisecond
+	r.reconnectMaxDelay = 5 * time.Millisecond
+
+	if err := r.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+
+	mu.Lock()
+	first := made[0]
+	mu.Unlock()
+
+	if !first.connected.Load() || !r.IsConnected() {
+		t.Fatal("initial carrier is not connected")
+	}
+
+	r.ForceReconnect("test logical dead session")
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		count := len(made)
+		var secondConnected bool
+		if count >= 2 {
+			secondConnected = made[1].connected.Load()
+		}
+		mu.Unlock()
+
+		if count >= 2 && secondConnected && r.IsConnected() {
+			if !first.stopped.Load() {
+				t.Fatal("forced reconnect did not stop old session")
+			}
+			if got := r.reconnects.Load(); got != 1 {
+				t.Fatalf("reconnects=%d want 1", got)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	t.Fatal("forced reconnect did not rebuild Volga session")
+}
