@@ -124,6 +124,9 @@ func TestEncryptedTransportPingRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	exitWire.deliver(clientWire.sent)
+	if exitNode.PeerPingSequence() != 1 {
+		t.Fatalf("peer ping sequence = %d, want 1", exitNode.PeerPingSequence())
+	}
 	clientWire.deliver(exitWire.sent)
 	if client.PingSequence() != 1 {
 		t.Fatalf("ping sequence = %d, want 1", client.PingSequence())

@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	_ "github.com/wlynxg/anet"
 
@@ -59,8 +60,10 @@ func main() {
 
 	config := transport.DefaultConfig()
 
+	carrier := yandex.NewResilientYandexVolgaTransport(documentURL, config)
+
 	encrypted, err := transport.NewEncryptedTransport(
-		yandex.NewResilientYandexVolgaTransport(documentURL, config),
+		carrier,
 		secret,
 		documentURL,
 		*exitNode,
@@ -88,6 +91,10 @@ func main() {
 		log.Fatalf("Start Volga transport: %v", err)
 	}
 
+	if *exitNode {
+		go superviseExitLiveness(encrypted, carrier)
+	}
+
 	tun := tunnel.NewTCPTunnel(trans, *exitNode)
 
 	if *exitNode {
@@ -98,6 +105,52 @@ func main() {
 	log.Printf("Running as CLIENT (SOCKS5 on %s)", *socksAddr)
 	server := socks5.NewSOCKS5Server(*socksAddr, tun)
 	log.Fatal(server.Start())
+}
+
+const (
+	exitLivenessCheckInterval = 10 * time.Second
+	exitLivenessFailureWindow = 90 * time.Second
+)
+
+func superviseExitLiveness(
+	encrypted *transport.EncryptedTransport,
+	carrier *yandex.ResilientYandexVolgaTransport,
+) {
+	ticker := time.NewTicker(exitLivenessCheckInterval)
+	defer ticker.Stop()
+
+	var lastSequence int64
+	var lastHeartbeat time.Time
+	armed := false
+
+	for now := range ticker.C {
+		sequence := encrypted.PeerPingSequence()
+
+		if sequence != lastSequence {
+			lastSequence = sequence
+			lastHeartbeat = now
+			armed = true
+			continue
+		}
+
+		if !armed || lastHeartbeat.IsZero() {
+			continue
+		}
+
+		if now.Sub(lastHeartbeat) < exitLivenessFailureWindow {
+			continue
+		}
+
+		log.Printf(
+			"Exit liveness timeout: no encrypted client heartbeat for %s; rebuilding Volga session",
+			now.Sub(lastHeartbeat).Round(time.Second),
+		)
+
+		carrier.ForceReconnect("exit end-to-end encrypted client heartbeat timeout")
+
+		armed = false
+		lastHeartbeat = time.Time{}
+	}
 }
 
 func readRequiredOption(value, filename, label string) (string, error) {

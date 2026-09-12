@@ -32,17 +32,18 @@ var encryptedMagic = [3]byte{'O', 'F', 'X'}
 // KDF salt; secrecy comes exclusively from the shared secret.
 type EncryptedTransport struct {
 	Transport
-	sendAEAD      cipher.AEAD
-	receiveAEAD   cipher.AEAD
-	sendDirection byte
-	recvDirection byte
-	seenMu        sync.Mutex
-	seen          map[string]struct{}
-	seenOrder     []string
-	pingMu        sync.Mutex
-	pendingPings  map[uint64]time.Time
-	lastPingMs    atomic.Int64
-	pingSequence  atomic.Int64
+	sendAEAD         cipher.AEAD
+	receiveAEAD      cipher.AEAD
+	sendDirection    byte
+	recvDirection    byte
+	seenMu           sync.Mutex
+	seen             map[string]struct{}
+	seenOrder        []string
+	pingMu           sync.Mutex
+	pendingPings     map[uint64]time.Time
+	lastPingMs       atomic.Int64
+	pingSequence     atomic.Int64
+	peerPingSequence atomic.Int64
 }
 
 // NewEncryptedTransport creates a directional AES-256-GCM transport. Both
@@ -152,6 +153,7 @@ func (e *EncryptedTransport) Receive(callback func([]byte)) {
 			callback(plaintext[1:])
 		case framePingRequest:
 			if len(plaintext) == 9 {
+				e.peerPingSequence.Add(1)
 				response := append([]byte{framePingResponse}, plaintext[1:]...)
 				_ = e.sendFrame(response)
 			}
@@ -215,6 +217,10 @@ func (e *EncryptedTransport) LastPingMillis() int64 {
 
 func (e *EncryptedTransport) PingSequence() int64 {
 	return e.pingSequence.Load()
+}
+
+func (e *EncryptedTransport) PeerPingSequence() int64 {
+	return e.peerPingSequence.Load()
 }
 
 func (e *EncryptedTransport) rememberNonce(nonce []byte) bool {
