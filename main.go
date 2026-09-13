@@ -92,7 +92,18 @@ func main() {
 	}
 
 	if *exitNode {
-		go superviseExitLiveness(encrypted, carrier)
+		probeCarrier := yandex.NewResilientYandexVolgaTransport(documentURL, config)
+		probeEncrypted, probeErr := transport.NewEncryptedTransport(
+			probeCarrier,
+			secret,
+			documentURL,
+			false,
+		)
+		if probeErr != nil {
+			log.Fatalf("Configure exit liveness self-probe: %v", probeErr)
+		}
+
+		go superviseExitLiveness(probeEncrypted, probeCarrier, carrier)
 	}
 
 	tun := tunnel.NewTCPTunnel(trans, *exitNode)
@@ -108,48 +119,80 @@ func main() {
 }
 
 const (
-	exitLivenessCheckInterval = 10 * time.Second
+	exitLivenessProbeInterval = 30 * time.Second
 	exitLivenessFailureWindow = 90 * time.Second
+	exitLivenessStartRetry    = 5 * time.Second
 )
 
 func superviseExitLiveness(
-	encrypted *transport.EncryptedTransport,
-	carrier *yandex.ResilientYandexVolgaTransport,
+	probe *transport.EncryptedTransport,
+	probeCarrier *yandex.ResilientYandexVolgaTransport,
+	exitCarrier *yandex.ResilientYandexVolgaTransport,
 ) {
-	ticker := time.NewTicker(exitLivenessCheckInterval)
+	// The probe is a real encrypted client on a separate Volga session.
+	// Its ping must traverse Yandex -> exit -> Yandex before PingSequence
+	// advances, so it detects a logically stale exit session even when no
+	// external Android clients are online.
+	probe.Receive(func([]byte) {})
+
+	for {
+		if err := probe.Start(); err != nil {
+			log.Printf(
+				"Exit liveness self-probe start failed: %v; retrying in %s",
+				err,
+				exitLivenessStartRetry,
+			)
+			time.Sleep(exitLivenessStartRetry)
+			continue
+		}
+
+		log.Printf("Exit liveness self-probe started")
+		break
+	}
+
+	ticker := time.NewTicker(exitLivenessProbeInterval)
 	defer ticker.Stop()
 
-	var lastSequence int64
-	var lastHeartbeat time.Time
-	armed := false
+	lastSequence := probe.PingSequence()
+	lastPong := time.Now()
 
-	for now := range ticker.C {
-		sequence := encrypted.PeerPingSequence()
-
+	probeOnce := func(now time.Time) {
+		sequence := probe.PingSequence()
 		if sequence != lastSequence {
 			lastSequence = sequence
-			lastHeartbeat = now
-			armed = true
-			continue
+			lastPong = now
 		}
 
-		if !armed || lastHeartbeat.IsZero() {
-			continue
+		if err := probe.Ping(); err != nil {
+			log.Printf("Exit liveness self-probe send failed: %v", err)
 		}
 
-		if now.Sub(lastHeartbeat) < exitLivenessFailureWindow {
-			continue
+		if now.Sub(lastPong) < exitLivenessFailureWindow {
+			return
 		}
 
 		log.Printf(
-			"Exit liveness timeout: no encrypted client heartbeat for %s; rebuilding Volga session",
-			now.Sub(lastHeartbeat).Round(time.Second),
+			"Exit liveness timeout: self-probe received no encrypted pong for %s; rebuilding Volga sessions",
+			now.Sub(lastPong).Round(time.Second),
 		)
 
-		carrier.ForceReconnect("exit end-to-end encrypted client heartbeat timeout")
+		exitCarrier.ForceReconnect(
+			"exit encrypted self-probe timeout",
+		)
+		probeCarrier.ForceReconnect(
+			"exit encrypted self-probe timeout",
+		)
 
-		armed = false
-		lastHeartbeat = time.Time{}
+		// Give both freshly requested Volga bootstrap cycles a complete
+		// liveness window before declaring another failure.
+		lastPong = now
+	}
+
+	// Send the first probe immediately.
+	probeOnce(time.Now())
+
+	for now := range ticker.C {
+		probeOnce(now)
 	}
 }
 
