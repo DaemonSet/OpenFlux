@@ -24,7 +24,8 @@ type packetClient struct {
 	encrypted      *transport.EncryptedTransport
 	carrier        *yandex.ResilientYandexVolgaTransport
 	watchdogCancel context.CancelFunc
-	packets        [][]byte
+	packetQueue    chan []byte
+	readStop       chan struct{}
 	logs           []string
 }
 
@@ -47,13 +48,21 @@ func Start(documentURL, encryptionSecret string) string {
 		return "Ключ шифрования должен содержать не менее 16 символов"
 	}
 
+	queueSize := transport.DefaultConfig().MaxQueueSize
+	if queueSize < 1 {
+		queueSize = 1
+	}
+	packetQueue := make(chan []byte, queueSize)
+	readStop := make(chan struct{})
+
 	client.mu.Lock()
 	if client.running {
 		client.mu.Unlock()
 		return ""
 	}
 	client.running = true
-	client.packets = nil
+	client.packetQueue = packetQueue
+	client.readStop = readStop
 	client.logs = nil
 	client.encrypted = nil
 	client.mu.Unlock()
@@ -86,16 +95,7 @@ func Start(documentURL, encryptionSecret string) string {
 	trans = transport.NewDNSMuxTransport(trans, false)
 	trans.Receive(func(data []byte) {
 		packet := append([]byte(nil), data...)
-		client.mu.Lock()
-		if !client.running {
-			client.mu.Unlock()
-			return
-		}
-		if len(client.packets) >= config.MaxQueueSize {
-			client.packets = client.packets[1:]
-		}
-		client.packets = append(client.packets, packet)
-		client.mu.Unlock()
+		enqueuePacket(packetQueue, readStop, packet)
 	})
 
 	if err := trans.Start(); err != nil {
@@ -123,14 +123,19 @@ func Stop() {
 	client.mu.Lock()
 	trans := client.transport
 	cancel := client.watchdogCancel
+	readStop := client.readStop
 	client.running = false
 	client.transport = nil
 	client.encrypted = nil
 	client.carrier = nil
 	client.watchdogCancel = nil
-	client.packets = nil
+	client.packetQueue = nil
+	client.readStop = nil
 	client.mu.Unlock()
 
+	if readStop != nil {
+		close(readStop)
+	}
 	if cancel != nil {
 		cancel()
 	}
@@ -274,16 +279,55 @@ func ResolveDNS(query []byte, dnsServer string) []byte {
 	return answer
 }
 
-// Read returns one received packet, or nil when the queue is empty.
-func Read() []byte {
-	client.mu.Lock()
-	defer client.mu.Unlock()
-	if len(client.packets) == 0 {
+func enqueuePacket(packetQueue chan []byte, readStop <-chan struct{}, packet []byte) {
+	select {
+	case <-readStop:
+		return
+	default:
+	}
+
+	select {
+	case packetQueue <- packet:
+		return
+	default:
+	}
+
+	// Queue full: discard the oldest packet and keep the newest traffic.
+	select {
+	case <-packetQueue:
+	default:
+	}
+
+	select {
+	case packetQueue <- packet:
+	case <-readStop:
+	default:
+	}
+}
+
+func readPacket(packetQueue <-chan []byte, readStop <-chan struct{}) []byte {
+	select {
+	case packet := <-packetQueue:
+		return packet
+	case <-readStop:
 		return nil
 	}
-	packet := client.packets[0]
-	client.packets = client.packets[1:]
-	return packet
+}
+
+// Read blocks until a received packet is available or the Android VPN session
+// stops. This avoids waking Java/Go hundreds of times per second while idle.
+func Read() []byte {
+	client.mu.Lock()
+	packetQueue := client.packetQueue
+	readStop := client.readStop
+	running := client.running
+	client.mu.Unlock()
+
+	if !running || packetQueue == nil || readStop == nil {
+		return nil
+	}
+
+	return readPacket(packetQueue, readStop)
 }
 
 // ReadLogs returns and clears the pending log lines.

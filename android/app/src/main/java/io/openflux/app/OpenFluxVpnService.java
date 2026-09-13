@@ -177,16 +177,11 @@ public final class OpenFluxVpnService extends VpnService {
         try {
             while (isCurrent(session)) {
                 byte[] packet = Mobile.read();
-                if (packet == null || packet.length == 0) {
-                    Thread.sleep(2);
-                    continue;
-                }
+                if (packet == null || packet.length == 0) return;
                 inject(session, output, packet);
             }
         } catch (IOException exception) {
             if (isCurrent(session)) fail(session, "Запись TUN: " + exception.getMessage());
-        } catch (InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
         }
     }
 
