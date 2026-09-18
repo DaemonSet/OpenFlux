@@ -1,8 +1,10 @@
 package tunnel
 
 import (
+	"context"
 	"fmt"
 	"net"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -17,6 +19,8 @@ import (
 	"universal-bypass-tool/utils"
 )
 
+const defaultTCPDialTimeout = 10 * time.Second
+
 type TCPTunnel struct {
 	gvisorStack *stack.Stack
 	tunnelEP    *TunnelLinkEndpoint
@@ -24,14 +28,16 @@ type TCPTunnel struct {
 	isExitNode  bool
 	rawEP       *RawSocketEndpoint
 	startTime   time.Time
+	dialTimeout time.Duration
 	packetCount atomic.Uint64
 }
 
 func NewTCPTunnel(trans transport.Transport, isExitNode bool) *TCPTunnel {
 	t := &TCPTunnel{
-		transport:  trans,
-		isExitNode: isExitNode,
-		startTime:  time.Now(),
+		transport:   trans,
+		isExitNode:  isExitNode,
+		startTime:   time.Now(),
+		dialTimeout: defaultTCPDialTimeout,
 	}
 
 	utils.Debugf("[TUNNEL] Net stack init...")
@@ -141,9 +147,17 @@ func (t *TCPTunnel) setupClient(tunnelNIC tcpip.NICID) {
 }
 
 func (t *TCPTunnel) DialTCP(address string) (net.Conn, error) {
-	tcpAddr, err := net.ResolveTCPAddr("tcp", address)
+	timeout := t.dialTimeout
+	if timeout <= 0 {
+		timeout = defaultTCPDialTimeout
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	tcpAddr, err := resolveTCPAddrContext(ctx, address)
 	if err != nil {
-		return nil, fmt.Errorf("resolve: %w", err)
+		return nil, err
 	}
 
 	ip := tcpAddr.IP.To4()
@@ -156,13 +170,55 @@ func (t *TCPTunnel) DialTCP(address string) (net.Conn, error) {
 		nic = tcpip.NICID(2)
 	}
 
-	conn, err := gonet.DialTCP(t.gvisorStack, tcpip.FullAddress{
+	conn, err := gonet.DialContextTCP(ctx, t.gvisorStack, tcpip.FullAddress{
 		NIC:  nic,
 		Addr: tcpip.AddrFrom4([4]byte{ip[0], ip[1], ip[2], ip[3]}),
 		Port: uint16(tcpAddr.Port),
 	}, ipv4.ProtocolNumber)
+	if err != nil {
+		return nil, fmt.Errorf("dial %s: %w", address, err)
+	}
 
-	return conn, err
+	return conn, nil
+}
+
+func resolveTCPAddrContext(ctx context.Context, address string) (*net.TCPAddr, error) {
+	host, portText, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, fmt.Errorf("split address %q: %w", address, err)
+	}
+
+	port, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil {
+		return nil, fmt.Errorf("invalid TCP port %q: %w", portText, err)
+	}
+
+	if parsedIP := net.ParseIP(host); parsedIP != nil {
+		ip := parsedIP.To4()
+		if ip == nil {
+			return nil, fmt.Errorf("IPv6 not supported")
+		}
+		return &net.TCPAddr{
+			IP:   ip,
+			Port: int(port),
+		}, nil
+	}
+
+	resolved, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s: %w", host, err)
+	}
+
+	for _, candidate := range resolved {
+		if ip := candidate.IP.To4(); ip != nil {
+			return &net.TCPAddr{
+				IP:   ip,
+				Port: int(port),
+			}, nil
+		}
+	}
+
+	return nil, fmt.Errorf("resolve %s: no IPv4 address", host)
 }
 
 func (t *TCPTunnel) ListenTCP(port uint16) (net.Listener, error) {
