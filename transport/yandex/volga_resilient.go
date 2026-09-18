@@ -308,8 +308,12 @@ func (t *ResilientYandexVolgaTransport) detachSession() resilientVolgaSession {
 
 func (t *ResilientYandexVolgaTransport) eventf(format string, args ...interface{}) {
 	message := fmt.Sprintf(format, args...)
-	// log.Printf is visible in journald even when the CLI was not started with
-	// --debug; Debugf additionally feeds the Android in-app log sink.
+	// Debugf writes to stderr and mirrors to the embedding log sink. When
+	// verbose logging is disabled, fall back to the standard logger so recovery
+	// events remain visible in journald without printing every event twice.
+	if utils.IsVerbose() {
+		utils.Debugf("%s", message)
+		return
+	}
 	log.Print(message)
-	utils.Debugf("%s", message)
 }

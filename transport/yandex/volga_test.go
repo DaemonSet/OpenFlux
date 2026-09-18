@@ -204,6 +204,95 @@ func TestVolgaWSStopInterruptsBlockedRead(t *testing.T) {
 	}
 }
 
+func TestVolgaSafeURLStripsSensitiveQuery(t *testing.T) {
+	raw := "https://volga.yandex.ru/document/?token=secret-token&sign=secret-sign#fragment"
+	got := volgaSafeURL(raw)
+	if got != "https://volga.yandex.ru/document/" {
+		t.Fatalf("safe URL=%q", got)
+	}
+	if strings.Contains(got, "secret-token") || strings.Contains(got, "secret-sign") {
+		t.Fatalf("safe URL leaked query data: %q", got)
+	}
+}
+
+func TestVolgaHTTPErrorCauseDropsRequestURL(t *testing.T) {
+	err := &url.Error{
+		Op:  "Get",
+		URL: "https://volga.yandex.ru/document/?token=secret-token",
+		Err: errors.New("network unavailable"),
+	}
+	got := volgaHTTPErrorCause(err)
+	if got == nil {
+		t.Fatal("expected error cause")
+	}
+	if got.Error() != "network unavailable" {
+		t.Fatalf("cause=%q", got.Error())
+	}
+	if strings.Contains(got.Error(), "secret-token") {
+		t.Fatalf("error cause leaked request URL: %q", got.Error())
+	}
+}
+
+func TestVolgaHTTPClientUsesBoundedTimeouts(t *testing.T) {
+	timeouts := volgaHTTPTimeouts{
+		Dial:           2 * time.Second,
+		TLSHandshake:   3 * time.Second,
+		ResponseHeader: 4 * time.Second,
+		Request:        5 * time.Second,
+	}
+	client, err := newVolgaHTTPClientWithTimeouts(timeouts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.Timeout != timeouts.Request {
+		t.Fatalf("client timeout=%s want=%s", client.Timeout, timeouts.Request)
+	}
+	tr, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type=%T want *http.Transport", client.Transport)
+	}
+	if tr.TLSHandshakeTimeout != timeouts.TLSHandshake {
+		t.Fatalf("TLS handshake timeout=%s want=%s", tr.TLSHandshakeTimeout, timeouts.TLSHandshake)
+	}
+	if tr.ResponseHeaderTimeout != timeouts.ResponseHeader {
+		t.Fatalf("response header timeout=%s want=%s", tr.ResponseHeaderTimeout, timeouts.ResponseHeader)
+	}
+	if tr.DialContext == nil {
+		t.Fatal("HTTP transport has no bounded DialContext")
+	}
+}
+
+func TestVolgaHTTPResponseHeaderTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		rw.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client, err := newVolgaHTTPClientWithTimeouts(volgaHTTPTimeouts{
+		Dial:           time.Second,
+		TLSHandshake:   time.Second,
+		ResponseHeader: 40 * time.Millisecond,
+		Request:        time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	started := time.Now()
+	resp, err := client.Get(server.URL)
+	elapsed := time.Since(started)
+	if resp != nil {
+		resp.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("request unexpectedly succeeded despite response-header timeout")
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("response-header timeout took %s; want <500ms", elapsed)
+	}
+}
+
 func TestVolgaRelayAuthErrorClassification(t *testing.T) {
 	if !isVolgaRelayAuthError(&volgaRelayHTTPError{StatusCode: http.StatusUnauthorized}) {
 		t.Fatal("401 must be classified as auth failure")

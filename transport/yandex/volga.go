@@ -128,20 +128,47 @@ type volgaAuth struct {
 	sessionID string
 }
 
+type volgaHTTPTimeouts struct {
+	Dial           time.Duration
+	TLSHandshake   time.Duration
+	ResponseHeader time.Duration
+	Request        time.Duration
+}
+
+var defaultVolgaHTTPTimeouts = volgaHTTPTimeouts{
+	Dial:           5 * time.Second,
+	TLSHandshake:   5 * time.Second,
+	ResponseHeader: 8 * time.Second,
+	Request:        12 * time.Second,
+}
+
 func newVolgaHTTPClient() (*http.Client, error) {
+	return newVolgaHTTPClientWithTimeouts(defaultVolgaHTTPTimeouts)
+}
+
+func newVolgaHTTPClientWithTimeouts(timeouts volgaHTTPTimeouts) (*http.Client, error) {
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		return nil, err
 	}
+
+	dialer := &net.Dialer{
+		Timeout:   timeouts.Dial,
+		KeepAlive: 30 * time.Second,
+	}
 	return &http.Client{
 		Jar: jar,
 		Transport: &http.Transport{
-			MaxIdleConns:        64,
-			MaxIdleConnsPerHost: 32,
-			IdleConnTimeout:     90 * time.Second,
-			ForceAttemptHTTP2:   true,
+			DialContext:           dialer.DialContext,
+			MaxIdleConns:          64,
+			MaxIdleConnsPerHost:   32,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   timeouts.TLSHandshake,
+			ResponseHeaderTimeout: timeouts.ResponseHeader,
+			ExpectContinueTimeout: 1 * time.Second,
+			ForceAttemptHTTP2:     true,
 		},
-		Timeout: 30 * time.Second,
+		Timeout: timeouts.Request,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -203,12 +230,16 @@ func volgaAuthorize(docURL string) (*volgaAuth, error) {
 	req.Header.Set("Sec-Fetch-Mode", "navigate")
 	req.Header.Set("Sec-Fetch-Site", "cross-site")
 
+	requestStarted := time.Now()
+	utils.Debugf("[VOLGA] POST auth/initial begin %s", volgaSafeURL(actionURL))
 	resp, err := client.Do(req)
+	requestElapsed := time.Since(requestStarted).Round(time.Millisecond)
 	if err != nil {
-		return nil, fmt.Errorf("POST auth/initial: %w", err)
+		return nil, fmt.Errorf("POST auth/initial after %s: %w", requestElapsed, volgaHTTPErrorCause(err))
 	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
+	utils.Debugf("[VOLGA] POST auth/initial -> %d in %s", resp.StatusCode, requestElapsed)
 
 	if resp.StatusCode < 300 || resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("auth/initial status %d; expected redirect", resp.StatusCode)
@@ -259,9 +290,16 @@ func volgaAuthorize(docURL string) (*volgaAuth, error) {
 	getReq, err := http.NewRequest(http.MethodGet, resolvedLocation, nil)
 	if err == nil {
 		volgaSetBrowserHeaders(getReq, a.origin, actionURL)
-		if getResp, getErr := client.Do(getReq); getErr == nil {
+		bootstrapStarted := time.Now()
+		utils.Debugf("[VOLGA] bootstrap GET begin %s", volgaSafeURL(resolvedLocation))
+		getResp, getErr := client.Do(getReq)
+		bootstrapElapsed := time.Since(bootstrapStarted).Round(time.Millisecond)
+		if getErr == nil {
 			io.Copy(io.Discard, getResp.Body)
 			getResp.Body.Close()
+			utils.Debugf("[VOLGA] bootstrap GET -> %d in %s", getResp.StatusCode, bootstrapElapsed)
+		} else {
+			utils.Debugf("[VOLGA] bootstrap GET failed after %s: %v", bootstrapElapsed, volgaHTTPErrorCause(getErr))
 		}
 	}
 
@@ -294,17 +332,20 @@ func volgaFetchDocumentPage(client *http.Client, docURL string) (string, []byte,
 		}
 		volgaSetBrowserHeaders(req, volgaOrigin(current), docURL)
 
+		requestStarted := time.Now()
+		utils.Debugf("[VOLGA] GET begin %s", volgaSafeURL(current))
 		resp, err := client.Do(req)
+		requestElapsed := time.Since(requestStarted).Round(time.Millisecond)
 		if err != nil {
-			return "", nil, fmt.Errorf("GET %s: %w", current, err)
+			return "", nil, fmt.Errorf("GET %s after %s: %w", volgaSafeURL(current), requestElapsed, volgaHTTPErrorCause(err))
 		}
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 		resp.Body.Close()
 		if readErr != nil {
-			return "", nil, fmt.Errorf("read %s: %w", current, readErr)
+			return "", nil, fmt.Errorf("read %s after %s: %w", volgaSafeURL(current), requestElapsed, readErr)
 		}
 
-		utils.Debugf("[VOLGA] GET %s -> %d (%d bytes)", current, resp.StatusCode, len(body))
+		utils.Debugf("[VOLGA] GET %s -> %d (%d bytes) in %s", volgaSafeURL(current), resp.StatusCode, len(body), requestElapsed)
 
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 			location := resp.Header.Get("Location")
@@ -363,6 +404,25 @@ func volgaResolveURL(baseURL, location string) (string, error) {
 		return "", err
 	}
 	return base.ResolveReference(ref).String(), nil
+}
+
+func volgaSafeURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "<invalid-url>"
+	}
+	return u.Scheme + "://" + u.Host + u.EscapedPath()
+}
+
+func volgaHTTPErrorCause(err error) error {
+	if err == nil {
+		return nil
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		return urlErr.Err
+	}
+	return err
 }
 
 func volgaOrigin(raw string) string {
