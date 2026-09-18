@@ -71,10 +71,17 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - uses: android-actions/setup-android@v3
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
 
       - name: Install Android SDK components
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973"
+
+      - name: Build native OpenFlux ARM64 core
+        run: ./android-native/build-openflux-native.sh
 
       - uses: gradle/actions/setup-gradle@v4
         with:
@@ -101,6 +108,12 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: GRADLE_BIN="$(command -v gradle)" ./build_android_app.sh
+
+      - name: Verify native core is packaged
+        shell: bash
+        run: |
+          set -euo pipefail
+          unzip -l dist/OpenFlux-android-arm64-v8a-release.apk             | grep -Fq 'lib/arm64-v8a/libopenflux_native.so'
 
       - name: Verify APK signatures
         run: for apk in dist/OpenFlux-android-*-release.apk; do "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose "$apk"; done

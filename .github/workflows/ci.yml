@@ -92,9 +92,17 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - uses: android-actions/setup-android@v3
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
 
-      - run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973"
+      - name: Install Android SDK components
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973"
+
+      - name: Build native OpenFlux ARM64 core
+        run: ./android-native/build-openflux-native.sh
 
       - uses: gradle/actions/setup-gradle@v4
         with:
@@ -104,7 +112,14 @@ jobs:
 
       - run: go install golang.org/x/mobile/cmd/gobind@v0.0.0-20260908204917-8b95e45f8d3e
 
-      - run: GRADLE_BIN="$(command -v gradle)" ./build_android_app.sh
+      - name: Build Android debug APKs
+        run: GRADLE_BIN="$(command -v gradle)" ./build_android_app.sh
+
+      - name: Verify native core is packaged
+        shell: bash
+        run: |
+          set -euo pipefail
+          unzip -l dist/OpenFlux-android-arm64-v8a-debug.apk             | grep -Fq 'lib/arm64-v8a/libopenflux_native.so'
 
       - uses: actions/upload-artifact@v4
         with:
