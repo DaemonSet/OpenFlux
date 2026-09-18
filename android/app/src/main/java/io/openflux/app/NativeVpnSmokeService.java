@@ -26,6 +26,10 @@ public final class NativeVpnSmokeService extends VpnService {
             "openflux_native_smoke";
     private static final int NOTIFICATION_ID = 81;
 
+    private static final int E2E_ATTEMPT_TIMEOUT_MS = 4_000;
+    private static final long E2E_RETRY_MIN_MS = 500;
+    private static final long E2E_RETRY_MAX_MS = 8_000;
+
     private final ExecutorService worker =
             Executors.newSingleThreadExecutor();
 
@@ -260,10 +264,15 @@ public final class NativeVpnSmokeService extends VpnService {
             }
 
             Log.i(TAG,
-                    "NATIVE VPN LOCAL READY (E2E not yet verified)");
+                    "NATIVE VPN LOCAL READY (transport E2E probe pending)");
 
             updateNotification(
-                    "Native VPN local dataplane ready"
+                    "Local dataplane ready; checking transport E2E"
+            );
+
+            waitForTransportE2e(
+                    session,
+                    socksPort
             );
 
         } catch (Throwable error) {
@@ -280,6 +289,64 @@ public final class NativeVpnSmokeService extends VpnService {
                                 )
                 );
             }
+        }
+    }
+
+    private void waitForTransportE2e(
+            int session,
+            int socksPort
+    ) throws InterruptedException {
+        long retryDelayMs = E2E_RETRY_MIN_MS;
+        int attempt = 0;
+
+        while (isCurrent(session)) {
+            attempt++;
+
+            try {
+                String statusLine =
+                        NativeTransportE2eProbe.probeHttp(
+                                socksPort,
+                                E2E_ATTEMPT_TIMEOUT_MS
+                        );
+
+                if (!isCurrent(session)) {
+                    return;
+                }
+
+                Log.i(TAG,
+                        "NATIVE TRANSPORT E2E READY via SOCKS5: "
+                                + statusLine);
+
+                updateNotification(
+                        "Native transport E2E verified"
+                );
+
+                return;
+
+            } catch (IOException error) {
+                if (!isCurrent(session)) {
+                    return;
+                }
+
+                Log.w(TAG,
+                        "Transport E2E probe attempt "
+                                + attempt
+                                + " failed: "
+                                + String.valueOf(
+                                        error.getMessage()
+                                ));
+
+                updateNotification(
+                        "Local dataplane ready; waiting for transport E2E"
+                );
+            }
+
+            Thread.sleep(retryDelayMs);
+
+            retryDelayMs = Math.min(
+                    retryDelayMs * 2,
+                    E2E_RETRY_MAX_MS
+            );
         }
     }
 
