@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -39,6 +40,9 @@ type DNSMuxTransport struct {
 	pendingMu sync.Mutex
 	pending   map[uint32]chan dnsMuxResult
 	nextID    atomic.Uint32
+
+	rxPendingOnce sync.Once
+	rxOrphanOnce  sync.Once
 }
 
 func NewDNSMuxTransport(inner Transport, exitNode bool) *DNSMuxTransport {
@@ -167,10 +171,18 @@ func (d *DNSMuxTransport) deliverResult(id uint32, result dnsMuxResult) {
 	d.pendingMu.Unlock()
 
 	if ch != nil {
+		d.rxPendingOnce.Do(func() {
+			log.Printf("[RXBOUND] dnsmux pending MATCH id=%d ok=%v bytes=%d",
+				id, result.err == nil, len(result.data))
+		})
 		select {
 		case ch <- result:
 		default:
 		}
+	} else {
+		d.rxOrphanOnce.Do(func() {
+			log.Printf("[RXBOUND] dnsmux orphan response id=%d", id)
+		})
 	}
 }
 

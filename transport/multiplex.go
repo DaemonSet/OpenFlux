@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -51,6 +52,10 @@ type MultiplexTransport struct {
 	nextSlot     byte
 	dnsRoutes    map[uint32]muxDNSRoute
 	nextDNSID    uint32
+
+	rxUnpackOnce   sync.Once
+	rxMatchOnce    sync.Once
+	rxMismatchOnce sync.Once
 }
 
 func NewMultiplexTransport(inner Transport, exitNode bool) (*MultiplexTransport, error) {
@@ -111,10 +116,21 @@ func (m *MultiplexTransport) Receive(callback func([]byte)) {
 			return
 		}
 
+		m.rxUnpackOnce.Do(func() {
+			log.Printf("[RXBOUND] mux unpack OK")
+		})
+
 		if !m.exitNode {
 			if clientID != m.clientID {
+				m.rxMismatchOnce.Do(func() {
+					log.Printf("[RXBOUND] mux client-id mismatch")
+				})
 				return
 			}
+
+			m.rxMatchOnce.Do(func() {
+				log.Printf("[RXBOUND] mux client-id MATCH")
+			})
 			callback(packet)
 			return
 		}

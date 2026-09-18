@@ -255,8 +255,11 @@ func volgaAuthorize(docURL string) (*volgaAuth, error) {
 	if err == nil {
 		volgaSetBrowserHeaders(getReq, a.origin, actionURL)
 		if getResp, getErr := client.Do(getReq); getErr == nil {
+			utils.Debugf("[VOLGA AUTH TRACE] bootstrap GET status=%d", getResp.StatusCode)
 			io.Copy(io.Discard, getResp.Body)
 			getResp.Body.Close()
+		} else {
+			utils.Debugf("[VOLGA AUTH TRACE] bootstrap GET error=%v", getErr)
 		}
 	}
 
@@ -512,6 +515,7 @@ func (r *volgaRelay) Stop() {
 }
 
 func (r *volgaRelay) Send(data []byte) error {
+	utils.Debugf("[VOLGA TRACE] relay.Send bytes=%d", len(data))
 	if len(data) == 0 {
 		return nil
 	}
@@ -524,6 +528,7 @@ func (r *volgaRelay) Send(data []byte) error {
 	case <-r.ctx.Done():
 		return errors.New("Volga relay stopped")
 	case r.queue <- copyOfData:
+		utils.Debugf("[VOLGA TRACE] queued bytes=%d queue=%d", len(copyOfData), len(r.queue))
 		return nil
 	default:
 		r.stats.queueDrops.Add(1)
@@ -545,6 +550,7 @@ func (r *volgaRelay) batchLoop() {
 		}
 		out := make([][]byte, len(batch))
 		copy(out, batch)
+		utils.Debugf("[VOLGA TRACE] flush batch packets=%d bytes=%d", len(out), bytesInBatch)
 		select {
 		case <-r.ctx.Done():
 			return false
@@ -610,6 +616,7 @@ func (r *volgaRelay) worker(id int) {
 }
 
 func (r *volgaRelay) sendBatch(batch [][]byte) error {
+	utils.Debugf("[VOLGA TRACE] sendBatch begin packets=%d", len(batch))
 	encoded, totalBytes, err := volgaEncodeBatch(batch)
 	if err != nil {
 		return err
@@ -675,14 +682,23 @@ func (r *volgaRelay) sendBatch(batch [][]byte) error {
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
 
+	utils.Debugf("[VOLGA TRACE] relay POST begin bytes=%d path=%s", totalBytes, r.auth.requestPath)
 	resp, err := r.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("relay POST: %w", err)
 	}
-	io.Copy(io.Discard, resp.Body)
+	responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 	resp.Body.Close()
+	utils.Debugf("[VOLGA TRACE] relay POST status=%d packets=%d bytes=%d",
+		resp.StatusCode, len(batch), totalBytes)
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		utils.Debugf(
+			"[VOLGA AUTH TRACE] relay rejected status=%d www-auth=%q body=%q",
+			resp.StatusCode,
+			resp.Header.Get("WWW-Authenticate"),
+			strings.TrimSpace(string(responseBody)),
+		)
 		return fmt.Errorf("relay POST returned HTTP %d", resp.StatusCode)
 	}
 
@@ -979,6 +995,7 @@ func (w *volgaWS) handleBundleItem(raw json.RawMessage) {
 	}
 
 	for _, packet := range packets {
+		utils.Debugf("[VOLGA TRACE] websocket RX packet bytes=%d", len(packet))
 		w.stats.packetsRecv.Add(1)
 		w.stats.bytesRecv.Add(uint64(len(packet)))
 		if w.onData != nil {
@@ -1075,6 +1092,8 @@ func (t *YandexVolgaTransport) Stop() error {
 }
 
 func (t *YandexVolgaTransport) Send(data []byte) error {
+	utils.Debugf("[VOLGA TRACE] transport.Send bytes=%d connected=%v",
+		len(data), t.IsConnected())
 	if !t.IsConnected() {
 		return errors.New("Volga transport not connected")
 	}

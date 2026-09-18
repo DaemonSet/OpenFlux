@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -43,6 +44,10 @@ type EncryptedTransport struct {
 	pendingPings  map[uint64]time.Time
 	lastPingMs    atomic.Int64
 	pingSequence  atomic.Int64
+
+	rxHeaderOnce   sync.Once
+	rxAuthFailOnce sync.Once
+	rxDecryptOnce  sync.Once
 }
 
 // NewEncryptedTransport creates a directional AES-256-GCM transport. Both
@@ -138,15 +143,31 @@ func (e *EncryptedTransport) Receive(callback func([]byte)) {
 			header[4] != e.recvDirection {
 			return
 		}
+
+		e.rxHeaderOnce.Do(func() {
+			log.Printf("[RXBOUND] encrypted header+direction OK")
+		})
+
 		nonceEnd := encryptedHeader + e.receiveAEAD.NonceSize()
 		nonce := packet[encryptedHeader:nonceEnd]
 		plaintext, err := e.receiveAEAD.Open(nil, nonce, packet[nonceEnd:], header)
-		if err != nil || !e.rememberNonce(nonce) {
+		if err != nil {
+			e.rxAuthFailOnce.Do(func() {
+				log.Printf("[RXBOUND] encrypted GCM auth FAILED")
+			})
+			return
+		}
+		if !e.rememberNonce(nonce) {
 			return
 		}
 		if len(plaintext) == 0 {
 			return
 		}
+
+		e.rxDecryptOnce.Do(func() {
+			log.Printf("[RXBOUND] encrypted decrypt OK frame=%d bytes=%d",
+				plaintext[0], len(plaintext))
+		})
 		switch plaintext[0] {
 		case frameData:
 			callback(plaintext[1:])

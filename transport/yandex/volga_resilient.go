@@ -45,6 +45,9 @@ type ResilientYandexVolgaTransport struct {
 	inner    resilientVolgaSession
 	receiver func([]byte)
 
+	rxDropOnce    sync.Once
+	rxForwardOnce sync.Once
+
 	lifecycleMu sync.Mutex
 	ctx         context.Context
 	cancel      context.CancelFunc
@@ -257,9 +260,18 @@ func (t *ResilientYandexVolgaTransport) startSession(ctx context.Context) (resil
 		active := t.inner == session
 		callback := t.receiver
 		t.mu.RUnlock()
-		if active && callback != nil {
-			callback(data)
+		if !active || callback == nil {
+			t.rxDropOnce.Do(func() {
+				log.Printf("[RXBOUND] resilient DROP active=%v receiver=%v",
+					active, callback != nil)
+			})
+			return
 		}
+
+		t.rxForwardOnce.Do(func() {
+			log.Printf("[RXBOUND] resilient forward OK")
+		})
+		callback(data)
 	})
 
 	result := make(chan error, 1)
