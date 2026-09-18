@@ -82,6 +82,10 @@ final class NativeOpenFluxProcess {
         List<String> command = new ArrayList<>();
         command.add(binary.getAbsolutePath());
 
+        // This class is the native smoke/debug harness. Keep the Go core
+        // verbose so relay and websocket failures are visible in logcat.
+        command.add("--debug");
+
         command.add("--client");
 
         command.add("--transport");

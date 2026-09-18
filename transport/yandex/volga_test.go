@@ -2,11 +2,17 @@ package yandex
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"net/http"
 	"net/http/cookiejar"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 func TestVolgaBatchRoundTrip(t *testing.T) {
@@ -103,6 +109,98 @@ func TestVolgaRelayAuthFailureCallbackRunsOnce(t *testing.T) {
 
 	if calls != 1 {
 		t.Fatalf("auth failure callback calls=%d want=1", calls)
+	}
+}
+
+func TestVolgaRelayRepeatedFailuresTriggerTransportFailure(t *testing.T) {
+	calls := 0
+	r := &volgaRelay{
+		cfg: VolgaConfig{RelayFailureThreshold: 3},
+		onTransportFailure: func(error) {
+			calls++
+		},
+	}
+
+	err := errors.New("relay unavailable")
+	r.noteSendError(err)
+	r.noteSendError(err)
+	if calls != 0 {
+		t.Fatalf("transport failure callback calls=%d before threshold", calls)
+	}
+	r.noteSendError(err)
+	r.noteSendError(err)
+	if calls != 1 {
+		t.Fatalf("transport failure callback calls=%d want=1", calls)
+	}
+}
+
+func TestVolgaRelaySuccessResetsFailureStreak(t *testing.T) {
+	calls := 0
+	r := &volgaRelay{
+		cfg: VolgaConfig{RelayFailureThreshold: 3},
+		onTransportFailure: func(error) {
+			calls++
+		},
+	}
+
+	err := errors.New("relay unavailable")
+	r.noteSendError(err)
+	r.noteSendError(err)
+	r.noteSendSuccess()
+	r.noteSendError(err)
+	r.noteSendError(err)
+	if calls != 0 {
+		t.Fatalf("transport failure callback calls=%d after reset", calls)
+	}
+	r.noteSendError(err)
+	if calls != 1 {
+		t.Fatalf("transport failure callback calls=%d want=1", calls)
+	}
+}
+
+func TestVolgaWSStopInterruptsBlockedRead(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		conn, err := upgrader.Upgrade(rw, req, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	w := &volgaWS{ctx: ctx, cancel: cancel}
+	if !w.setActiveConn(conn) {
+		t.Fatal("failed to register active websocket")
+	}
+	w.wg.Add(1)
+	go func() {
+		defer w.wg.Done()
+		_, _, _ = conn.ReadMessage()
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		w.Stop()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Stop remained blocked on websocket ReadMessage")
 	}
 }
 

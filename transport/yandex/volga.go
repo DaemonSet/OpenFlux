@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -37,10 +39,11 @@ import (
 // implementation so both can be tested independently.
 
 type VolgaConfig struct {
-	MaxIdleConnsPerHost int
-	MaxIdleConns        int
-	IdleConnTimeout     time.Duration
-	RelayTimeout        time.Duration
+	MaxIdleConnsPerHost   int
+	MaxIdleConns          int
+	IdleConnTimeout       time.Duration
+	RelayTimeout          time.Duration
+	RelayFailureThreshold int
 
 	WorkerCount int
 	QueueSize   int
@@ -61,10 +64,11 @@ type VolgaConfig struct {
 
 func DefaultVolgaConfig() VolgaConfig {
 	return VolgaConfig{
-		MaxIdleConnsPerHost: 64,
-		MaxIdleConns:        128,
-		IdleConnTimeout:     90 * time.Second,
-		RelayTimeout:        15 * time.Second,
+		MaxIdleConnsPerHost:   64,
+		MaxIdleConns:          128,
+		IdleConnTimeout:       90 * time.Second,
+		RelayTimeout:          15 * time.Second,
+		RelayFailureThreshold: 3,
 
 		WorkerCount: 8,
 		QueueSize:   4096,
@@ -481,6 +485,11 @@ type volgaRelay struct {
 	onAuthFailure   func()
 	authFailureOnce sync.Once
 
+	onTransportFailure   func(error)
+	transportFailureOnce sync.Once
+	healthMu             sync.Mutex
+	consecutiveFailures  int
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -496,7 +505,13 @@ type volgaRelay struct {
 	frontier   string
 }
 
-func newVolgaRelay(auth *volgaAuth, cfg VolgaConfig, stats *volgaStats, onAuthFailure func()) *volgaRelay {
+func newVolgaRelay(
+	auth *volgaAuth,
+	cfg VolgaConfig,
+	stats *volgaStats,
+	onAuthFailure func(),
+	onTransportFailure func(error),
+) *volgaRelay {
 	ctx, cancel := context.WithCancel(context.Background())
 	tr := &http.Transport{
 		MaxIdleConns:        cfg.MaxIdleConns,
@@ -506,10 +521,11 @@ func newVolgaRelay(auth *volgaAuth, cfg VolgaConfig, stats *volgaStats, onAuthFa
 		ForceAttemptHTTP2:   true,
 	}
 	return &volgaRelay{
-		auth:          auth,
-		cfg:           cfg,
-		stats:         stats,
-		onAuthFailure: onAuthFailure,
+		auth:               auth,
+		cfg:                cfg,
+		stats:              stats,
+		onAuthFailure:      onAuthFailure,
+		onTransportFailure: onTransportFailure,
 		client: &http.Client{
 			Transport: tr,
 			Timeout:   cfg.RelayTimeout,
@@ -632,16 +648,41 @@ func (r *volgaRelay) worker(id int) {
 				utils.Debugf("[VOLGA] relay worker %d: %v", id, err)
 			} else {
 				r.stats.httpSent.Add(1)
+				r.noteSendSuccess()
 			}
 		}
 	}
 }
 
 func (r *volgaRelay) noteSendError(err error) {
-	if !isVolgaRelayAuthError(err) || r.onAuthFailure == nil {
+	if isVolgaRelayAuthError(err) {
+		if r.onAuthFailure != nil {
+			r.authFailureOnce.Do(r.onAuthFailure)
+		}
 		return
 	}
-	r.authFailureOnce.Do(r.onAuthFailure)
+
+	threshold := r.cfg.RelayFailureThreshold
+	if threshold <= 0 {
+		threshold = 3
+	}
+
+	r.healthMu.Lock()
+	r.consecutiveFailures++
+	trigger := r.consecutiveFailures >= threshold
+	r.healthMu.Unlock()
+
+	if trigger && r.onTransportFailure != nil {
+		r.transportFailureOnce.Do(func() {
+			r.onTransportFailure(err)
+		})
+	}
+}
+
+func (r *volgaRelay) noteSendSuccess() {
+	r.healthMu.Lock()
+	r.consecutiveFailures = 0
+	r.healthMu.Unlock()
 }
 
 func (r *volgaRelay) sendBatch(batch [][]byte) error {
@@ -803,6 +844,8 @@ type volgaWS struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+	connMu sync.Mutex
+	conn   *websocket.Conn
 
 	readyOnce sync.Once
 	ready     chan struct{}
@@ -830,7 +873,39 @@ func (w *volgaWS) Start() {
 
 func (w *volgaWS) Stop() {
 	w.cancel()
+	w.closeActiveConn()
 	w.wg.Wait()
+}
+
+func (w *volgaWS) setActiveConn(conn *websocket.Conn) bool {
+	if conn == nil {
+		return false
+	}
+	w.connMu.Lock()
+	defer w.connMu.Unlock()
+	if w.ctx.Err() != nil {
+		return false
+	}
+	w.conn = conn
+	return true
+}
+
+func (w *volgaWS) clearActiveConn(conn *websocket.Conn) {
+	w.connMu.Lock()
+	if w.conn == conn {
+		w.conn = nil
+	}
+	w.connMu.Unlock()
+}
+
+func (w *volgaWS) closeActiveConn() {
+	w.connMu.Lock()
+	conn := w.conn
+	w.conn = nil
+	w.connMu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
 }
 
 func (w *volgaWS) WaitReady(timeout time.Duration) error {
@@ -898,8 +973,12 @@ func (w *volgaWS) connect() error {
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: w.cfg.WSHandshakeTimeout,
-		ReadBufferSize:   1 << 20,
-		WriteBufferSize:  1 << 20,
+		NetDialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ReadBufferSize:  1 << 20,
+		WriteBufferSize: 1 << 20,
 	}
 	conn, resp, err := dialer.DialContext(w.ctx, wsURL, header)
 	if err != nil {
@@ -908,7 +987,14 @@ func (w *volgaWS) connect() error {
 		}
 		return fmt.Errorf("dial: %w", err)
 	}
-	defer conn.Close()
+	if !w.setActiveConn(conn) {
+		_ = conn.Close()
+		return errors.New("Volga websocket stopped")
+	}
+	defer func() {
+		w.clearActiveConn(conn)
+		_ = conn.Close()
+	}()
 
 	utils.Debugf("[VOLGA] Xiva websocket connected user=%s", w.auth.userIDStr)
 	if w.onState != nil {
@@ -1064,10 +1150,19 @@ func (t *YandexVolgaTransport) Start() error {
 		return fmt.Errorf("Volga auth: %w", err)
 	}
 
-	relay := newVolgaRelay(auth, t.cfg, t.stats, func() {
-		utils.Debugf("[VOLGA] relay authorization rejected; full re-auth required")
-		t.SetConnected(false)
-	})
+	relay := newVolgaRelay(
+		auth,
+		t.cfg,
+		t.stats,
+		func() {
+			log.Printf("[VOLGA] relay authorization rejected; full re-auth required")
+			t.SetConnected(false)
+		},
+		func(err error) {
+			log.Printf("[VOLGA] relay unhealthy after repeated send failures: %v; full re-auth required", err)
+			t.SetConnected(false)
+		},
+	)
 	relay.Start()
 
 	ws := newVolgaWS(auth, t.cfg, t.stats, relay, func(data []byte) {

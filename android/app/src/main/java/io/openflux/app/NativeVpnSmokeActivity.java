@@ -82,13 +82,6 @@ public final class NativeVpnSmokeActivity extends Activity {
         );
 
         startForegroundService(intent);
-
-        status.setText(
-                "Native VPN start requested.\n\n"
-                        + "Transport: "
-                        + transport
-                        + "\n\n"
-                        + "Check logcat."
-        );
+        finish();
     }
 }

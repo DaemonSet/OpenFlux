@@ -36,11 +36,17 @@ func NewRawSocketEndpoint(nicID tcpip.NICID) (*RawSocketEndpoint, error) {
 		syscall.Close(sendFd)
 		return nil, fmt.Errorf("IP_HDRINCL: %v", err)
 	}
+	if err := syscall.SetsockoptInt(sendFd, syscall.SOL_SOCKET, syscall.SO_SNDBUF, 16*1024*1024); err != nil {
+		utils.Debugf("[RAW-NIC%d] SO_SNDBUF tuning failed: %v", nicID, err)
+	}
 
 	recvFd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_TCP)
 	if err != nil {
 		syscall.Close(sendFd)
 		return nil, fmt.Errorf("recv socket failed: %v (need root)", err)
+	}
+	if err := syscall.SetsockoptInt(recvFd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, 16*1024*1024); err != nil {
+		utils.Debugf("[RAW-NIC%d] SO_RCVBUF tuning failed: %v", nicID, err)
 	}
 
 	addr := &syscall.SockaddrInet4{

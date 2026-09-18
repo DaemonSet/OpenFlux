@@ -260,10 +260,10 @@ public final class NativeVpnSmokeService extends VpnService {
             }
 
             Log.i(TAG,
-                    "NATIVE VPN READY");
+                    "NATIVE VPN LOCAL READY (E2E not yet verified)");
 
             updateNotification(
-                    "Native VPN active"
+                    "Native VPN local dataplane ready"
             );
 
         } catch (Throwable error) {
