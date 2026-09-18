@@ -110,11 +110,12 @@ type volgaAuth struct {
 	finalURL string
 	origin   string
 
-	accessToken string
-	token       string
-	requestPath string
-	resourceURL string
-	docID       string
+	accessToken       string
+	token             string
+	requestPath       string
+	resourceURL       string
+	docID             string
+	relayCookieHeader string
 
 	userID    int64
 	userIDStr string
@@ -259,6 +260,11 @@ func volgaAuthorize(docURL string) (*volgaAuth, error) {
 			getResp.Body.Close()
 		}
 	}
+
+	// Some Volga cookies are scoped to the bootstrap document path.
+	// Snapshot them here so relay requests can send the same authenticated
+	// browser session even when the cookie jar would omit them for /relay.
+	a.relayCookieHeader = volgaCookieHeader(client.Jar, resolvedLocation)
 
 	if a.token == "" || a.requestPath == "" || a.userIDStr == "" || a.sign == "" || a.sessionID == "" {
 		return nil, fmt.Errorf(
@@ -448,12 +454,32 @@ func volgaCookieHeader(jar http.CookieJar, rawURL string) string {
 	return strings.Join(parts, "; ")
 }
 
+type volgaRelayHTTPError struct {
+	StatusCode int
+}
+
+func (e *volgaRelayHTTPError) Error() string {
+	return fmt.Sprintf("relay POST returned HTTP %d", e.StatusCode)
+}
+
+func isVolgaRelayAuthError(err error) bool {
+	var httpErr *volgaRelayHTTPError
+	if !errors.As(err, &httpErr) {
+		return false
+	}
+	return httpErr.StatusCode == http.StatusUnauthorized ||
+		httpErr.StatusCode == http.StatusForbidden
+}
+
 type volgaRelay struct {
 	auth  *volgaAuth
 	cfg   VolgaConfig
 	stats *volgaStats
 
 	client *http.Client
+
+	onAuthFailure   func()
+	authFailureOnce sync.Once
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -470,7 +496,7 @@ type volgaRelay struct {
 	frontier   string
 }
 
-func newVolgaRelay(auth *volgaAuth, cfg VolgaConfig, stats *volgaStats) *volgaRelay {
+func newVolgaRelay(auth *volgaAuth, cfg VolgaConfig, stats *volgaStats, onAuthFailure func()) *volgaRelay {
 	ctx, cancel := context.WithCancel(context.Background())
 	tr := &http.Transport{
 		MaxIdleConns:        cfg.MaxIdleConns,
@@ -480,9 +506,10 @@ func newVolgaRelay(auth *volgaAuth, cfg VolgaConfig, stats *volgaStats) *volgaRe
 		ForceAttemptHTTP2:   true,
 	}
 	return &volgaRelay{
-		auth:  auth,
-		cfg:   cfg,
-		stats: stats,
+		auth:          auth,
+		cfg:           cfg,
+		stats:         stats,
+		onAuthFailure: onAuthFailure,
 		client: &http.Client{
 			Transport: tr,
 			Timeout:   cfg.RelayTimeout,
@@ -601,12 +628,20 @@ func (r *volgaRelay) worker(id int) {
 		case batch := <-r.batches:
 			if err := r.sendBatch(batch); err != nil {
 				r.stats.httpFailed.Add(1)
+				r.noteSendError(err)
 				utils.Debugf("[VOLGA] relay worker %d: %v", id, err)
 			} else {
 				r.stats.httpSent.Add(1)
 			}
 		}
 	}
+}
+
+func (r *volgaRelay) noteSendError(err error) {
+	if !isVolgaRelayAuthError(err) || r.onAuthFailure == nil {
+		return
+	}
+	r.authFailureOnce.Do(r.onAuthFailure)
 }
 
 func (r *volgaRelay) sendBatch(batch [][]byte) error {
@@ -674,6 +709,9 @@ func (r *volgaRelay) sendBatch(batch [][]byte) error {
 	req.Header.Set("Sec-Fetch-Dest", "empty")
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	if r.auth.relayCookieHeader != "" {
+		req.Header.Set("Cookie", r.auth.relayCookieHeader)
+	}
 
 	resp, err := r.client.Do(req)
 	if err != nil {
@@ -683,7 +721,7 @@ func (r *volgaRelay) sendBatch(batch [][]byte) error {
 	resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("relay POST returned HTTP %d", resp.StatusCode)
+		return &volgaRelayHTTPError{StatusCode: resp.StatusCode}
 	}
 
 	r.stats.batchesSent.Add(1)
@@ -1026,7 +1064,10 @@ func (t *YandexVolgaTransport) Start() error {
 		return fmt.Errorf("Volga auth: %w", err)
 	}
 
-	relay := newVolgaRelay(auth, t.cfg, t.stats)
+	relay := newVolgaRelay(auth, t.cfg, t.stats, func() {
+		utils.Debugf("[VOLGA] relay authorization rejected; full re-auth required")
+		t.SetConnected(false)
+	})
 	relay.Start()
 
 	ws := newVolgaWS(auth, t.cfg, t.stats, relay, func(data []byte) {

@@ -2,6 +2,10 @@ package yandex
 
 import (
 	"bytes"
+	"net/http"
+	"net/http/cookiejar"
+	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -52,5 +56,64 @@ func TestVolgaParseClientConfig(t *testing.T) {
 	}
 	if cfg["officeActionData"] == nil {
 		t.Fatal("officeActionData missing after parse")
+	}
+}
+
+func TestVolgaDocumentCookieSnapshotForRelay(t *testing.T) {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	docURL, err := url.Parse("https://volga.yandex.ru/document/example")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	jar.SetCookies(docURL, []*http.Cookie{
+		{
+			Name:  "volga-session",
+			Value: "test-value",
+			Path:  "/document/",
+		},
+	})
+
+	snapshot := volgaCookieHeader(jar, docURL.String())
+	if !strings.Contains(snapshot, "volga-session=test-value") {
+		t.Fatalf("document cookie missing from snapshot: %q", snapshot)
+	}
+
+	relayURL := "https://volga.yandex.ru/session/main/example/relay"
+	if got := volgaCookieHeader(jar, relayURL); got != "" {
+		t.Fatalf("path-scoped cookie unexpectedly available to relay URL: %q", got)
+	}
+}
+
+func TestVolgaRelayAuthFailureCallbackRunsOnce(t *testing.T) {
+	calls := 0
+	r := &volgaRelay{
+		onAuthFailure: func() {
+			calls++
+		},
+	}
+
+	r.noteSendError(&volgaRelayHTTPError{StatusCode: http.StatusUnauthorized})
+	r.noteSendError(&volgaRelayHTTPError{StatusCode: http.StatusForbidden})
+	r.noteSendError(&volgaRelayHTTPError{StatusCode: http.StatusInternalServerError})
+
+	if calls != 1 {
+		t.Fatalf("auth failure callback calls=%d want=1", calls)
+	}
+}
+
+func TestVolgaRelayAuthErrorClassification(t *testing.T) {
+	if !isVolgaRelayAuthError(&volgaRelayHTTPError{StatusCode: http.StatusUnauthorized}) {
+		t.Fatal("401 must be classified as auth failure")
+	}
+	if !isVolgaRelayAuthError(&volgaRelayHTTPError{StatusCode: http.StatusForbidden}) {
+		t.Fatal("403 must be classified as auth failure")
+	}
+	if isVolgaRelayAuthError(&volgaRelayHTTPError{StatusCode: http.StatusInternalServerError}) {
+		t.Fatal("500 must not be classified as auth failure")
 	}
 }
