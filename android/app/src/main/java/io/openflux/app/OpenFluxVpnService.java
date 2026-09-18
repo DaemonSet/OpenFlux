@@ -24,6 +24,7 @@ import io.openflux.bridge.mobile.Mobile;
 public final class OpenFluxVpnService extends VpnService {
     public static final String ACTION_START = "io.openflux.app.START";
     public static final String ACTION_STOP = "io.openflux.app.STOP";
+    public static final String EXTRA_TRANSPORT = "transport";
     public static final String EXTRA_DOCUMENT_URL = "document_url";
     public static final String EXTRA_ENCRYPTION_SECRET = "encryption_secret";
     public static final String EXTRA_DNS_SERVER = "dns_server";
@@ -56,11 +57,13 @@ public final class OpenFluxVpnService extends VpnService {
         }
         if (running) return START_STICKY;
 
+        String transportName = intent == null ? null : intent.getStringExtra(EXTRA_TRANSPORT);
+        if (!"mailru".equals(transportName)) transportName = "volga";
         String url = intent == null ? null : intent.getStringExtra(EXTRA_DOCUMENT_URL);
         String encryptionSecret = intent == null ? null : intent.getStringExtra(EXTRA_ENCRYPTION_SECRET);
 
-        if (url == null || !url.startsWith("https://")) {
-            lastError = "Некорректная ссылка на документ";
+        if (url == null || url.trim().isEmpty()) {
+            lastError = "Ссылка на документ не указана";
             status = "Ошибка";
             running = false;
             stopSelf();
@@ -86,15 +89,16 @@ public final class OpenFluxVpnService extends VpnService {
         status = "Подключение…";
         lastError = "";
         int session = generation.incrementAndGet();
+        String selectedTransport = transportName;
         String selectedDns = dnsServer;
         int selectedMtu = mtu;
-        workers.execute(() -> startTunnel(url, encryptionSecret, selectedDns, selectedMtu, session));
+        workers.execute(() -> startTunnel(selectedTransport, url, encryptionSecret, selectedDns, selectedMtu, session));
         return START_STICKY;
     }
 
-    private void startTunnel(String url, String encryptionSecret, String dnsServer, int mtu, int session) {
+    private void startTunnel(String transportName, String url, String encryptionSecret, String dnsServer, int mtu, int session) {
         if (!isCurrent(session)) return;
-        String error = Mobile.start(url, encryptionSecret);
+        String error = Mobile.startWithTransport(transportName, url, encryptionSecret);
         if (error != null && !error.isEmpty()) {
             fail(session, error);
             return;
@@ -109,7 +113,7 @@ public final class OpenFluxVpnService extends VpnService {
         }
         if (!isCurrent(session)) return;
         if (!Mobile.isConnected()) {
-            fail(session, "Yandex Volga не подключился за 30 секунд");
+            fail(session, "Транспорт не подключился за 30 секунд");
             return;
         }
 
@@ -120,7 +124,7 @@ public final class OpenFluxVpnService extends VpnService {
                     .addAddress("10.10.10.2", 24)
                     .addRoute("0.0.0.0", 0)
                     .addDnsServer(dnsServer);
-            // Volga control/signaling connections are opened by Go inside this
+            // Carrier control/signaling connections are opened by Go inside this
             // process. Keep the app itself outside its own TUN to avoid recursion.
             builder.addDisallowedApplication(getPackageName());
             ParcelFileDescriptor established = builder.establish();
@@ -153,7 +157,10 @@ public final class OpenFluxVpnService extends VpnService {
         try {
             while (isCurrent(session)) {
                 int length = input.read(buffer);
-                if (length <= 0) continue;
+                if (length <= 0) {
+                    android.os.SystemClock.sleep(5);
+                    continue;
+                }
                 byte[] packet = Arrays.copyOf(buffer, length);
                 if (isIpv4UdpDns(packet)) {
                     workers.execute(() -> forwardDns(session, outputFor(session), packet, dnsServer));
