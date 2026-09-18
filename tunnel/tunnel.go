@@ -70,7 +70,9 @@ func NewTCPTunnel(trans transport.Transport, isExitNode bool) *TCPTunnel {
 		tunnelEP.InjectInbound(data)
 	})
 
-	go t.printStats()
+	if utils.IsVerbose() {
+		go t.printStats()
+	}
 	return t
 }
 

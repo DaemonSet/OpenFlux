@@ -41,6 +41,8 @@ public final class MainActivity extends Activity {
     private static final int VPN_PERMISSION_REQUEST = 42;
     private static final String DEFAULT_DNS = "94.140.14.14";
     private static final int DEFAULT_MTU = 1400;
+    private static final String TRANSPORT_VOLGA = "volga";
+    private static final String TRANSPORT_MAILRU = "mailru";
     private static final int PAGE_HOME = 0;
     private static final int PAGE_LOGS = 1;
     private static final int PAGE_SETTINGS = 2;
@@ -79,6 +81,7 @@ public final class MainActivity extends Activity {
     private TextView vpnButtonText;
     private String documentUrl;
     private String encryptionSecret;
+    private String transportName;
     private String dnsServer;
     private int mtu;
     private String logs = "";
@@ -96,7 +99,7 @@ public final class MainActivity extends Activity {
             updatePing();
             String pending = Mobile.readLogs();
             if (pending != null && !pending.isEmpty()) appendLog(pending);
-            handler.postDelayed(this, 500);
+            handler.postDelayed(this, 1000);
         }
     };
 
@@ -109,6 +112,8 @@ public final class MainActivity extends Activity {
         prefs.edit().remove("document_url").remove("connection_document_url").apply();
         documentUrl = secureSettings.getString("document_url", "");
         encryptionSecret = secureSettings.getString("encryption_secret", "");
+        transportName = prefs.getString("transport_name", TRANSPORT_VOLGA);
+        if (!TRANSPORT_MAILRU.equals(transportName)) transportName = TRANSPORT_VOLGA;
         String storedDns = prefs.getString("dns_server", null);
         if (storedDns == null
                 || storedDns.trim().isEmpty()
@@ -219,7 +224,7 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams titlesParams = new LinearLayout.LayoutParams(0, -2, 1f);
         titlesParams.leftMargin = dp(12);
         TextView title = text("OpenFlux", 21, text, true);
-        TextView subtitle = text("VPN через Yandex Volga", 12, secondary, false);
+        TextView subtitle = text("VPN через документный транспорт", 12, secondary, false);
         titles.addView(title);
         titles.addView(subtitle);
         header.addView(titles, titlesParams);
@@ -279,14 +284,15 @@ public final class MainActivity extends Activity {
         LinearLayout page = page();
         TextView heading = text("Подключение", 25, text, true);
         page.addView(heading);
-        TextView intro = text("Системный VPN-туннель через Yandex Volga.", 13, secondary, false);
+        TextView intro = text("Системный VPN-туннель через " + carrierDisplayName() + ".", 13, secondary, false);
         LinearLayout.LayoutParams introParams = matchWrap();
         introParams.topMargin = dp(4);
         page.addView(intro, introParams);
 
-        boolean documentConfigured = documentUrl != null && documentUrl.trim().startsWith("https://");
+        boolean documentConfigured = documentUrl != null && !documentUrl.trim().isEmpty();
         boolean encryptionConfigured = encryptionSecret != null && encryptionSecret.length() >= 16;
-        String transportTitle = documentConfigured && encryptionConfigured ? "Yandex Volga" : "Yandex Volga не настроен";
+        String carrier = carrierDisplayName();
+        String transportTitle = documentConfigured && encryptionConfigured ? carrier : carrier + " не настроен";
         String transportDetail = !documentConfigured
                 ? "Укажите HTTPS-ссылку на документ во вкладке «Настройки»"
                 : encryptionConfigured
@@ -409,7 +415,19 @@ public final class MainActivity extends Activity {
         transportLabelParams.topMargin = dp(24);
         transportLabelParams.bottomMargin = dp(8);
         page.addView(transportLabel, transportLabelParams);
-        page.addView(buildUrlField(), new LinearLayout.LayoutParams(-1, dp(56)));
+
+        Switch carrierSwitch = settingSwitch(
+                R.drawable.ic_link,
+                "Использовать Mail.ru Документы",
+                "Выключено — Yandex Volga",
+                TRANSPORT_MAILRU.equals(transportName));
+        carrierSwitch.setOnCheckedChangeListener((button, checked) ->
+                transportName = checked ? TRANSPORT_MAILRU : TRANSPORT_VOLGA);
+        page.addView((View) carrierSwitch.getTag());
+
+        LinearLayout.LayoutParams urlParams = new LinearLayout.LayoutParams(-1, dp(56));
+        urlParams.topMargin = dp(8);
+        page.addView(buildUrlField(), urlParams);
 
         LinearLayout.LayoutParams encryptionParams = new LinearLayout.LayoutParams(-1, dp(56));
         encryptionParams.topMargin = dp(8);
@@ -477,7 +495,7 @@ public final class MainActivity extends Activity {
     private View buildUrlField() {
         FrameLayout field = new FrameLayout(this);
         field.setBackground(rounded(surface, border, 1, 10));
-        urlInput = settingInput("HTTPS-ссылка на документ", documentUrl,
+        urlInput = settingInput("Ссылка на публичный документ", documentUrl,
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         urlInput.setTransformationMethod(urlVisible ? null : PasswordTransformationMethod.getInstance());
         urlInput.setPadding(dp(16), 0, dp(56), 0);
@@ -663,6 +681,7 @@ public final class MainActivity extends Activity {
         secureSettings.putString("encryption_secret", encryptionSecret);
         getPreferences(MODE_PRIVATE).edit()
                 .remove("connection_document_url")
+                .putString("transport_name", transportName)
                 .putString("dns_server", dnsServer)
                 .putInt("mtu", mtu)
                 .putBoolean("auto_scroll", autoScroll)
@@ -678,8 +697,8 @@ public final class MainActivity extends Activity {
             appendLog("Запрошена остановка VPN");
             return;
         }
-        if (documentUrl == null || !documentUrl.trim().startsWith("https://")) {
-            Toast.makeText(this, "Укажите корректную HTTPS-ссылку на документ", Toast.LENGTH_LONG).show();
+        if (documentUrl == null || documentUrl.trim().isEmpty()) {
+            Toast.makeText(this, "Укажите ссылку на публичный документ", Toast.LENGTH_LONG).show();
             showPage(PAGE_SETTINGS);
             return;
         }
@@ -703,12 +722,17 @@ public final class MainActivity extends Activity {
     private void startVpn() {
         Intent intent = new Intent(this, OpenFluxVpnService.class);
         intent.setAction(OpenFluxVpnService.ACTION_START);
+        intent.putExtra(OpenFluxVpnService.EXTRA_TRANSPORT, transportName);
         intent.putExtra(OpenFluxVpnService.EXTRA_DOCUMENT_URL, documentUrl.trim());
         intent.putExtra(OpenFluxVpnService.EXTRA_ENCRYPTION_SECRET, encryptionSecret);
         intent.putExtra(OpenFluxVpnService.EXTRA_DNS_SERVER, dnsServer);
         intent.putExtra(OpenFluxVpnService.EXTRA_MTU, mtu);
         startForegroundService(intent);
         appendLog("Запуск VPN…");
+    }
+
+    private String carrierDisplayName() {
+        return TRANSPORT_MAILRU.equals(transportName) ? "Mail.ru Документы" : "Yandex Volga";
     }
 
     private void updateStatus() {
@@ -753,7 +777,7 @@ public final class MainActivity extends Activity {
 
         setPingPanelVisible(true);
         long now = SystemClock.elapsedRealtime();
-        if (now - lastPingRequestAt >= 2000) {
+        if (now - lastPingRequestAt >= 10000) {
             lastPingRequestAt = now;
             Mobile.ping();
         }

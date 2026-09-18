@@ -1,6 +1,6 @@
 // Package mobile exposes the OpenFlux packet transport to Android through
 // gomobile. Android owns the TUN file descriptor; this package only transports
-// complete IPv4 packets through the encrypted Yandex Volga carrier.
+// complete IPv4 packets through the selected encrypted document carrier.
 package mobile
 
 import (
@@ -9,11 +9,13 @@ import (
 	"sync"
 
 	"universal-bypass-tool/transport"
+	"universal-bypass-tool/transport/mailru"
 	"universal-bypass-tool/transport/yandex"
 	"universal-bypass-tool/utils"
 )
 
 var client = packetClient{}
+var packetCond = sync.NewCond(&client.mu)
 
 type packetClient struct {
 	mu        sync.Mutex
@@ -33,10 +35,15 @@ func appendLog(message string) {
 	}
 }
 
-// Start connects the packet transport. It returns an empty string on success
-// and a user-readable error on failure.
+// Start preserves the existing Android API and defaults to Yandex Volga.
 func Start(documentURL, encryptionSecret string) string {
-	if documentURL == "" {
+	return StartWithTransport("volga", documentURL, encryptionSecret)
+}
+
+// StartWithTransport connects the packet transport. It returns an empty string
+// on success and a user-readable error on failure.
+func StartWithTransport(carrierName, documentURL, encryptionSecret string) string {
+	if strings.TrimSpace(documentURL) == "" {
 		return "Ссылка на документ не указана"
 	}
 	if len(encryptionSecret) < 16 {
@@ -54,13 +61,21 @@ func Start(documentURL, encryptionSecret string) string {
 	client.encrypted = nil
 	client.mu.Unlock()
 
+	config := transport.DefaultConfig()
+	carrier, encryptionContext, displayName, err := newMobileCarrier(carrierName, documentURL, config)
+	if err != nil {
+		client.mu.Lock()
+		client.running = false
+		client.mu.Unlock()
+		return err.Error()
+	}
+
 	utils.EnableDebug()
 	utils.SetLogSink(appendLog)
-	appendLog("[ANDROID] Запуск транспорта Yandex Volga")
+	appendLog(fmt.Sprintf("[ANDROID] Запуск транспорта %s", displayName))
 
-	config := transport.DefaultConfig()
 	encrypted, err := transport.NewEncryptedTransport(
-		yandex.NewResilientYandexVolgaTransport(documentURL, config), encryptionSecret, documentURL, false,
+		carrier, encryptionSecret, encryptionContext, false,
 	)
 	if err != nil {
 		client.mu.Lock()
@@ -90,6 +105,7 @@ func Start(documentURL, encryptionSecret string) string {
 			client.packets = client.packets[1:]
 		}
 		client.packets = append(client.packets, packet)
+		packetCond.Signal()
 		client.mu.Unlock()
 	})
 
@@ -108,6 +124,21 @@ func Start(documentURL, encryptionSecret string) string {
 	return ""
 }
 
+func newMobileCarrier(name, reference string, config transport.TransportConfig) (transport.Transport, string, string, error) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", "volga", "yandex-volga":
+		return yandex.NewResilientYandexVolgaTransport(reference, config), reference, "Yandex Volga", nil
+	case "mailru", "mail.ru", "mailru-docs":
+		weblink := mailru.NormalizeWeblink(reference)
+		if weblink == "" {
+			return nil, "", "", fmt.Errorf("ссылка на публичный документ Mail.ru пуста")
+		}
+		return mailru.NewDocsTransport(weblink, config), "mailru:" + weblink, "Mail.ru Docs", nil
+	default:
+		return nil, "", "", fmt.Errorf("неизвестный транспорт %q", name)
+	}
+}
+
 func Stop() {
 	client.mu.Lock()
 	trans := client.transport
@@ -115,6 +146,7 @@ func Stop() {
 	client.transport = nil
 	client.encrypted = nil
 	client.packets = nil
+	packetCond.Broadcast()
 	client.mu.Unlock()
 	appendLog("[ANDROID] Остановка транспорта")
 	if trans != nil {
@@ -177,8 +209,6 @@ func Send(packet []byte) string {
 	return ""
 }
 
-// ResolveDNS sends a raw DNS wire-format query through the active
-// OpenFlux transport and resolves it on the exit node.
 func ResolveDNS(query []byte, dnsServer string) []byte {
 	client.mu.Lock()
 	trans := client.transport
@@ -204,7 +234,24 @@ func ResolveDNS(query []byte, dnsServer string) []byte {
 	return answer
 }
 
-// Read returns one received packet, or nil when the queue is empty.
+// ReadWait blocks until a packet arrives or the transport is stopped.
+func ReadWait() []byte {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	for client.running && len(client.packets) == 0 {
+		packetCond.Wait()
+	}
+	if len(client.packets) == 0 {
+		return nil
+	}
+
+	packet := client.packets[0]
+	client.packets = client.packets[1:]
+	return packet
+}
+
+// Read is kept for compatibility with older Android bindings.
 func Read() []byte {
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -216,7 +263,6 @@ func Read() []byte {
 	return packet
 }
 
-// ReadLogs returns and clears the pending log lines.
 func ReadLogs() string {
 	client.mu.Lock()
 	defer client.mu.Unlock()

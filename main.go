@@ -11,6 +11,7 @@ import (
 
 	"universal-bypass-tool/socks5"
 	"universal-bypass-tool/transport"
+	"universal-bypass-tool/transport/mailru"
 	"universal-bypass-tool/transport/yandex"
 	"universal-bypass-tool/tunnel"
 	"universal-bypass-tool/utils"
@@ -21,10 +22,11 @@ func main() {
 	clientMode := flag.Bool("client", false, "Run as SOCKS5 client")
 	debug := flag.Bool("debug", false, "Enable verbose debug logging")
 	socksAddr := flag.String("socks5", ":1080", "SOCKS5 listen address")
+	carrierName := flag.String("transport", "volga", "Carrier transport: volga or mailru")
 
 	var documentURL string
-	flag.StringVar(&documentURL, "url", "", "Yandex document URL; prefer --url-file")
-	urlFile := flag.String("url-file", "", "Read the document URL from a file")
+	flag.StringVar(&documentURL, "url", "", "Public document URL; prefer --url-file")
+	urlFile := flag.String("url-file", "", "Read the public document URL from a file")
 	encryptionKeyFile := flag.String(
 		"encryption-key-file",
 		"",
@@ -32,7 +34,6 @@ func main() {
 	)
 	flag.Parse()
 
-	// Exactly one runtime mode is required.
 	if *exitNode == *clientMode {
 		flag.Usage()
 		os.Exit(2)
@@ -53,20 +54,24 @@ func main() {
 		log.Fatal(err)
 	}
 
+	config := transport.DefaultConfig()
+	carrier, encryptionContext, carrierDisplay, err := newCarrier(*carrierName, documentURL, config)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	log.Printf("=== OpenFlux ===")
 	log.Printf("Mode: %s", map[bool]string{true: "EXIT NODE", false: "CLIENT"}[*exitNode])
-	log.Printf("Carrier: Yandex Volga")
-
-	config := transport.DefaultConfig()
+	log.Printf("Carrier: %s", carrierDisplay)
 
 	encrypted, err := transport.NewEncryptedTransport(
-		yandex.NewResilientYandexVolgaTransport(documentURL, config),
+		carrier,
 		secret,
-		documentURL,
+		encryptionContext,
 		*exitNode,
 	)
 	if err != nil {
-		log.Fatalf("Configure encrypted Volga transport: %v", err)
+		log.Fatalf("Configure encrypted %s transport: %v", carrierDisplay, err)
 	}
 
 	compressed := transport.NewCompressedTransport(encrypted)
@@ -80,12 +85,11 @@ func main() {
 		log.Printf("Multi-client ID: %s", multiplexed.ClientID())
 	}
 
-	// DNS control messages use the same encrypted Volga carrier as data packets.
 	var trans transport.Transport = multiplexed
 	trans = transport.NewDNSMuxTransport(trans, *exitNode)
 
 	if err := trans.Start(); err != nil {
-		log.Fatalf("Start Volga transport: %v", err)
+		log.Fatalf("Start %s transport: %v", carrierDisplay, err)
 	}
 
 	tun := tunnel.NewTCPTunnel(trans, *exitNode)
@@ -98,6 +102,21 @@ func main() {
 	log.Printf("Running as CLIENT (SOCKS5 on %s)", *socksAddr)
 	server := socks5.NewSOCKS5Server(*socksAddr, tun)
 	log.Fatal(server.Start())
+}
+
+func newCarrier(name, reference string, config transport.TransportConfig) (transport.Transport, string, string, error) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", "volga", "yandex-volga":
+		return yandex.NewResilientYandexVolgaTransport(reference, config), reference, "Yandex Volga", nil
+	case "mailru", "mail.ru", "mailru-docs":
+		weblink := mailru.NormalizeWeblink(reference)
+		if weblink == "" {
+			return nil, "", "", fmt.Errorf("Mail.ru public document reference is empty")
+		}
+		return mailru.NewDocsTransport(weblink, config), "mailru:" + weblink, "Mail.ru Docs", nil
+	default:
+		return nil, "", "", fmt.Errorf("unknown transport %q (want volga or mailru)", name)
+	}
 }
 
 func readRequiredOption(value, filename, label string) (string, error) {
