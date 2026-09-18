@@ -32,6 +32,21 @@ func main() {
 		"",
 		"Read the shared transport encryption secret from a file",
 	)
+	dnsListen := flag.String(
+		"dns-listen",
+		"",
+		"Local DNS-over-TCP listener for DNSMux client requests",
+	)
+	dnsServer := flag.String(
+		"dns-server",
+		"94.140.14.14",
+		"Primary DNS server queried by the exit node",
+	)
+	dnsFallback := flag.String(
+		"dns-fallback",
+		"94.140.15.15",
+		"Fallback DNS server queried by the exit node",
+	)
 	flag.Parse()
 
 	if *exitNode == *clientMode {
@@ -85,11 +100,30 @@ func main() {
 		log.Printf("Multi-client ID: %s", multiplexed.ClientID())
 	}
 
-	var trans transport.Transport = multiplexed
-	trans = transport.NewDNSMuxTransport(trans, *exitNode)
+	dnsMux := transport.NewDNSMuxTransport(multiplexed, *exitNode)
+
+	var trans transport.Transport = dnsMux
 
 	if err := trans.Start(); err != nil {
 		log.Fatalf("Start %s transport: %v", carrierDisplay, err)
+	}
+
+	if !*exitNode && *dnsListen != "" {
+		dnsListener, err := startDNSTCPProxy(
+			*dnsListen,
+			dnsMux,
+			*dnsServer,
+			*dnsFallback,
+		)
+		if err != nil {
+			log.Fatalf("Start DNSMux TCP proxy: %v", err)
+		}
+		defer dnsListener.Close()
+
+		log.Printf(
+			"DNSMux TCP proxy listening on %s",
+			dnsListener.Addr(),
+		)
 	}
 
 	tun := tunnel.NewTCPTunnel(trans, *exitNode)

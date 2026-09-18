@@ -25,7 +25,6 @@ final class Tun2SocksProcess {
 
     private Process tun2socks;
     private Process pdnsd;
-    private DnsTcpRelay dnsRelay;
     private File socketPath;
 
     Tun2SocksProcess(Context context) {
@@ -35,6 +34,7 @@ final class Tun2SocksProcess {
     boolean start(
             int tunFd,
             int socksPort,
+            int nativeDnsPort,
             int mtu
     ) throws Exception {
 
@@ -73,19 +73,24 @@ final class Tun2SocksProcess {
             );
         }
 
-        dnsRelay = new DnsTcpRelay(socksPort);
-        dnsRelay.start();
+        if (nativeDnsPort <= 0) {
+            throw new IllegalArgumentException(
+                    "Invalid native DNS port: " + nativeDnsPort
+            );
+        }
 
         int dnsPort = allocatePort();
 
         writePdnsdConfig(
                 dnsPort,
-                dnsRelay.getPort()
+                nativeDnsPort
         );
 
         Log.i(TAG,
-                "DNS relay 127.0.0.1:"
-                        + dnsRelay.getPort());
+                "pdnsd 26.26.26.1:"
+                        + dnsPort
+                        + " -> native DNSMux 127.0.0.1:"
+                        + nativeDnsPort);
 
         pdnsd = new ProcessBuilder(
                 dnsBinary.getAbsolutePath(),
@@ -182,12 +187,12 @@ final class Tun2SocksProcess {
              attempt <= 10;
              attempt++) {
 
-            if (!tun2socks.isAlive()) {
-                throw new IOException(
-                        "tun2socks exited before FD handoff"
-                );
-            }
-
+            /*
+             * tun2socks daemonizes itself when --pid is used.
+             * The ProcessBuilder parent therefore exits normally,
+             * while the real daemon continues running and waits
+             * for the TUN fd on the Unix socket.
+             */
             int result = NativeBridge.sendfd(
                     tunFd,
                     socketPath.getAbsolutePath()
@@ -234,11 +239,6 @@ final class Tun2SocksProcess {
                         "pdnsd.pid"
                 )
         );
-
-        if (dnsRelay != null) {
-            dnsRelay.close();
-            dnsRelay = null;
-        }
 
         if (socketPath != null) {
             socketPath.delete();

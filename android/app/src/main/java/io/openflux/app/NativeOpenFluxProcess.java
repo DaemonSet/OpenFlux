@@ -28,6 +28,7 @@ final class NativeOpenFluxProcess {
     private Thread outputThread;
     private File keyFile;
     private int socksPort;
+    private int dnsPort;
 
     NativeOpenFluxProcess(Context context) {
         this.context = context.getApplicationContext();
@@ -39,6 +40,10 @@ final class NativeOpenFluxProcess {
 
     synchronized int getSocksPort() {
         return socksPort;
+    }
+
+    synchronized int getDnsPort() {
+        return dnsPort;
     }
 
     /*
@@ -71,6 +76,7 @@ final class NativeOpenFluxProcess {
         }
 
         socksPort = allocateLoopbackPort();
+        dnsPort = allocateLoopbackPort();
         keyFile = writeKey(encryptionSecret);
 
         List<String> command = new ArrayList<>();
@@ -90,9 +96,19 @@ final class NativeOpenFluxProcess {
         command.add("--encryption-key-file");
         command.add(keyFile.getAbsolutePath());
 
+        command.add("--dns-listen");
+        command.add("127.0.0.1:" + dnsPort);
+
+        command.add("--dns-server");
+        command.add("94.140.14.14");
+
+        command.add("--dns-fallback");
+        command.add("94.140.15.15");
+
         Log.i(TAG, "Starting native OpenFlux");
         Log.i(TAG, "Transport: " + transport);
         Log.i(TAG, "SOCKS5: 127.0.0.1:" + socksPort);
+        Log.i(TAG, "DNSMux TCP: 127.0.0.1:" + dnsPort);
 
         ProcessBuilder builder = new ProcessBuilder(command);
         builder.directory(context.getFilesDir());
@@ -126,6 +142,7 @@ final class NativeOpenFluxProcess {
             oldProcess = process;
             process = null;
             socksPort = 0;
+            dnsPort = 0;
         }
 
         if (oldProcess != null) {
