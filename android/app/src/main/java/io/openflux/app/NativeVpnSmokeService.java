@@ -27,6 +27,7 @@ public final class NativeVpnSmokeService extends VpnService {
     private static final int NOTIFICATION_ID = 81;
 
     private static final int E2E_ATTEMPT_TIMEOUT_MS = 4_000;
+    private static final long E2E_HEALTHY_INTERVAL_MS = 15_000;
     private static final long E2E_RETRY_MIN_MS = 500;
     private static final long E2E_RETRY_MAX_MS = 8_000;
 
@@ -270,37 +271,47 @@ public final class NativeVpnSmokeService extends VpnService {
                     "Local dataplane ready; checking transport E2E"
             );
 
-            waitForTransportE2e(
+            monitorTransportE2e(
                     session,
                     socksPort
             );
 
         } catch (Throwable error) {
+            if (!isCurrent(session)) {
+                return;
+            }
+
             Log.e(TAG,
                     "Native VPN failed",
                     error);
 
-            if (isCurrent(session)) {
-                fail(
-                        error.getClass().getSimpleName()
-                                + ": "
-                                + String.valueOf(
-                                        error.getMessage()
-                                )
-                );
-            }
+            fail(
+                    error.getClass().getSimpleName()
+                            + ": "
+                            + String.valueOf(
+                                    error.getMessage()
+                            )
+            );
         }
     }
 
-    private void waitForTransportE2e(
+    private void monitorTransportE2e(
             int session,
             int socksPort
     ) throws InterruptedException {
         long retryDelayMs = E2E_RETRY_MIN_MS;
-        int attempt = 0;
+        int failedAttempts = 0;
+        boolean everReady = false;
+        boolean ready = false;
 
         while (isCurrent(session)) {
-            attempt++;
+            if (ready
+                    && !sleepForSession(
+                            session,
+                            E2E_HEALTHY_INTERVAL_MS
+                    )) {
+                return;
+            }
 
             try {
                 String statusLine =
@@ -313,40 +324,102 @@ public final class NativeVpnSmokeService extends VpnService {
                     return;
                 }
 
-                Log.i(TAG,
-                        "NATIVE TRANSPORT E2E READY via SOCKS5: "
-                                + statusLine);
+                if (!everReady) {
+                    Log.i(TAG,
+                            "NATIVE TRANSPORT E2E READY via SOCKS5: "
+                                    + statusLine);
 
-                updateNotification(
-                        "Native transport E2E verified"
-                );
+                    updateNotification(
+                            "Native transport E2E verified"
+                    );
 
-                return;
+                } else if (!ready) {
+                    Log.i(TAG,
+                            "NATIVE TRANSPORT E2E RESTORED via SOCKS5: "
+                                    + statusLine);
+
+                    updateNotification(
+                            "Native transport E2E restored"
+                    );
+                }
+
+                everReady = true;
+                ready = true;
+                failedAttempts = 0;
+                retryDelayMs = E2E_RETRY_MIN_MS;
 
             } catch (IOException error) {
                 if (!isCurrent(session)) {
                     return;
                 }
 
-                Log.w(TAG,
-                        "Transport E2E probe attempt "
-                                + attempt
-                                + " failed: "
-                                + String.valueOf(
-                                        error.getMessage()
-                                ));
+                failedAttempts++;
 
-                updateNotification(
-                        "Local dataplane ready; waiting for transport E2E"
+                if (ready) {
+                    ready = false;
+
+                    Log.w(TAG,
+                            "NATIVE TRANSPORT E2E DEGRADED: "
+                                    + String.valueOf(
+                                            error.getMessage()
+                                    ));
+
+                    updateNotification(
+                            "Native transport degraded; recovering"
+                    );
+
+                } else {
+                    String phase =
+                            everReady
+                                    ? "recovery"
+                                    : "startup";
+
+                    Log.w(TAG,
+                            "Transport E2E "
+                                    + phase
+                                    + " probe attempt "
+                                    + failedAttempts
+                                    + " failed: "
+                                    + String.valueOf(
+                                            error.getMessage()
+                                    ));
+
+                    if (!everReady) {
+                        updateNotification(
+                                "Local dataplane ready; waiting for transport E2E"
+                        );
+                    }
+                }
+
+                if (!sleepForSession(
+                        session,
+                        retryDelayMs
+                )) {
+                    return;
+                }
+
+                retryDelayMs = Math.min(
+                        retryDelayMs * 2,
+                        E2E_RETRY_MAX_MS
                 );
             }
+        }
+    }
 
-            Thread.sleep(retryDelayMs);
+    private boolean sleepForSession(
+            int session,
+            long delayMs
+    ) throws InterruptedException {
+        try {
+            Thread.sleep(delayMs);
+            return isCurrent(session);
 
-            retryDelayMs = Math.min(
-                    retryDelayMs * 2,
-                    E2E_RETRY_MAX_MS
-            );
+        } catch (InterruptedException error) {
+            if (!isCurrent(session)) {
+                return false;
+            }
+
+            throw error;
         }
     }
 
