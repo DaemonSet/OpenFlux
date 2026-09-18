@@ -15,7 +15,7 @@ import (
 
 type TunnelLinkEndpoint struct {
 	dispatcher       stack.NetworkDispatcher
-	onOutgoingPacket func([]byte)
+	onOutgoingPacket func([]byte) error
 	packetIn         atomic.Uint64
 	packetOut        atomic.Uint64
 }
@@ -37,10 +37,15 @@ func (e *TunnelLinkEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcp
 	n := 0
 	for _, pkt := range pkts.AsSlice() {
 		data := pkt.ToView().ToSlice()
-		e.packetOut.Add(1)
 		if e.onOutgoingPacket != nil {
-			e.onOutgoingPacket(data)
+			if err := e.onOutgoingPacket(data); err != nil {
+				// The transport did not accept this packet. Tell gVisor that the
+				// lower link is temporarily unable to enqueue more data so TCP can
+				// retry instead of treating the packet as successfully transmitted.
+				return n, &tcpip.ErrNoBufferSpace{}
+			}
 		}
+		e.packetOut.Add(1)
 		n++
 	}
 	return n, nil

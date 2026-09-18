@@ -50,9 +50,7 @@ func NewTCPTunnel(trans transport.Transport, isExitNode bool) *TCPTunnel {
 	}
 
 	tunnelEP := NewTunnelLinkEndpoint()
-	tunnelEP.onOutgoingPacket = func(data []byte) {
-		trans.Send(data)
-	}
+	tunnelEP.onOutgoingPacket = trans.Send
 	t.tunnelEP = tunnelEP
 
 	tunnelNIC := tcpip.NICID(1)
@@ -88,7 +86,9 @@ func (t *TCPTunnel) setupExitNode(tunnelNIC tcpip.NICID) {
 
 	t.rawEP = rawEP
 	rawEP.SetTransportSender(func(data []byte) {
-		t.transport.Send(data)
+		if err := t.transport.Send(data); err != nil {
+			utils.Debugf("[TUNNEL] raw reply transport send failed: %v", err)
+		}
 	})
 
 	internetNIC := tcpip.NICID(2)
