@@ -65,6 +65,18 @@ func NewResilientYandexVolgaTransport(docURL string, cfg transport.TransportConf
 	})
 }
 
+const exitVolgaWSMaxConnectionAge = 5 * time.Minute
+
+// NewResilientYandexVolgaExitTransport bounds only the exit node's Xiva
+// websocket age. The Android/client transport keeps its existing behavior.
+func NewResilientYandexVolgaExitTransport(docURL string, cfg transport.TransportConfig) *ResilientYandexVolgaTransport {
+	return newResilientYandexVolgaTransport(docURL, cfg, func(url string, tc transport.TransportConfig) resilientVolgaSession {
+		session := NewYandexVolgaTransport(url, tc)
+		session.cfg.WSMaxConnectionAge = exitVolgaWSMaxConnectionAge
+		return session
+	})
+}
+
 func newResilientYandexVolgaTransport(docURL string, cfg transport.TransportConfig, factory resilientVolgaFactory) *ResilientYandexVolgaTransport {
 	return &ResilientYandexVolgaTransport{
 		BaseTransport:     transport.NewBaseTransport(cfg),

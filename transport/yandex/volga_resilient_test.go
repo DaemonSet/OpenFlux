@@ -138,3 +138,23 @@ func TestResilientVolgaLetsShortDisconnectRecoverInPlace(t *testing.T) {
 		t.Fatal("transport did not return to connected state")
 	}
 }
+
+func TestResilientVolgaExitBoundsXivaConnectionAge(t *testing.T) {
+	exit := NewResilientYandexVolgaExitTransport("https://example.invalid/doc", transport.DefaultConfig())
+	exitSession, ok := exit.make(exit.docURL, exit.cfg).(*YandexVolgaTransport)
+	if !ok {
+		t.Fatalf("exit session type=%T want *YandexVolgaTransport", exit.make(exit.docURL, exit.cfg))
+	}
+	if exitSession.cfg.WSMaxConnectionAge != exitVolgaWSMaxConnectionAge {
+		t.Fatalf("exit websocket max age=%s want=%s", exitSession.cfg.WSMaxConnectionAge, exitVolgaWSMaxConnectionAge)
+	}
+
+	client := NewResilientYandexVolgaTransport("https://example.invalid/doc", transport.DefaultConfig())
+	clientSession, ok := client.make(client.docURL, client.cfg).(*YandexVolgaTransport)
+	if !ok {
+		t.Fatalf("client session type=%T want *YandexVolgaTransport", client.make(client.docURL, client.cfg))
+	}
+	if clientSession.cfg.WSMaxConnectionAge != 0 {
+		t.Fatalf("client websocket max age=%s want disabled", clientSession.cfg.WSMaxConnectionAge)
+	}
+}

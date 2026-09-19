@@ -59,6 +59,7 @@ type VolgaConfig struct {
 
 	WSHandshakeTimeout time.Duration
 	WSReadTimeout      time.Duration
+	WSMaxConnectionAge time.Duration
 	StartTimeout       time.Duration
 }
 
@@ -84,6 +85,7 @@ func DefaultVolgaConfig() VolgaConfig {
 
 		WSHandshakeTimeout: 10 * time.Second,
 		WSReadTimeout:      90 * time.Second,
+		WSMaxConnectionAge: 0,
 		StartTimeout:       15 * time.Second,
 	}
 }
@@ -92,6 +94,8 @@ const (
 	volgaUserAgent = "Mozilla/5.0 (X11; Linux x86_64; rv:153.0) Gecko/20100101 Firefox/153.0"
 	volgaWireMagic = "OFV1"
 )
+
+var errVolgaWSRefresh = errors.New("Volga websocket subscription refresh")
 
 var volgaClientConfigRE = regexp.MustCompile(`<script[^>]*id=["']client-config["'][^>]*>(.*?)</script>`)
 
@@ -993,7 +997,11 @@ func (w *volgaWS) run() {
 			return
 		}
 		if err != nil {
-			utils.Debugf("[VOLGA] Xiva websocket: %v", err)
+			if errors.Is(err, errVolgaWSRefresh) {
+				log.Printf("[VOLGA] Xiva websocket refreshing subscription after bounded connection age")
+			} else {
+				utils.Debugf("[VOLGA] Xiva websocket: %v", err)
+			}
 		}
 		w.stats.wsReconnects.Add(1)
 
@@ -1056,6 +1064,7 @@ func (w *volgaWS) connect() error {
 		_ = conn.Close()
 	}()
 
+	connectedAt := time.Now()
 	utils.Debugf("[VOLGA] Xiva websocket connected user=%s", w.auth.userIDStr)
 	if w.onState != nil {
 		w.onState(true)
@@ -1071,9 +1080,25 @@ func (w *volgaWS) connect() error {
 		if w.ctx.Err() != nil {
 			return nil
 		}
-		_ = conn.SetReadDeadline(time.Now().Add(w.cfg.WSReadTimeout))
+
+		now := time.Now()
+		deadline := now.Add(w.cfg.WSReadTimeout)
+		if w.cfg.WSMaxConnectionAge > 0 {
+			maxDeadline := connectedAt.Add(w.cfg.WSMaxConnectionAge)
+			if !now.Before(maxDeadline) {
+				return errVolgaWSRefresh
+			}
+			if maxDeadline.Before(deadline) {
+				deadline = maxDeadline
+			}
+		}
+
+		_ = conn.SetReadDeadline(deadline)
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
+			if w.cfg.WSMaxConnectionAge > 0 && !time.Now().Before(connectedAt.Add(w.cfg.WSMaxConnectionAge)) {
+				return errVolgaWSRefresh
+			}
 			return fmt.Errorf("read: %w", err)
 		}
 		w.handleMessage(msg)

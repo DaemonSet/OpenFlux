@@ -70,7 +70,7 @@ func main() {
 	}
 
 	config := transport.DefaultConfig()
-	carrier, encryptionContext, carrierDisplay, err := newCarrier(*carrierName, documentURL, config)
+	carrier, encryptionContext, carrierDisplay, err := newCarrier(*carrierName, documentURL, config, *exitNode)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -138,9 +138,12 @@ func main() {
 	log.Fatal(server.Start())
 }
 
-func newCarrier(name, reference string, config transport.TransportConfig) (transport.Transport, string, string, error) {
+func newCarrier(name, reference string, config transport.TransportConfig, exitNode bool) (transport.Transport, string, string, error) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "", "volga", "yandex-volga":
+		if exitNode {
+			return yandex.NewResilientYandexVolgaExitTransport(reference, config), reference, "Yandex Volga", nil
+		}
 		return yandex.NewResilientYandexVolgaTransport(reference, config), reference, "Yandex Volga", nil
 	case "mailru", "mail.ru", "mailru-docs":
 		weblink := mailru.NormalizeWeblink(reference)
