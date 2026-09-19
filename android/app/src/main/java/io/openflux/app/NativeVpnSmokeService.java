@@ -8,6 +8,7 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.net.VpnService;
 import android.os.ParcelFileDescriptor;
+import android.os.PowerManager;
 import android.util.Log;
 
 import java.io.IOException;
@@ -27,9 +28,14 @@ public final class NativeVpnSmokeService extends VpnService {
     private static final int NOTIFICATION_ID = 81;
 
     private static final int E2E_ATTEMPT_TIMEOUT_MS = 4_000;
-    private static final long E2E_HEALTHY_INTERVAL_MS = 15_000;
+    private static final long E2E_HEALTHY_ACTIVE_INTERVAL_MS = 15_000;
+    private static final long E2E_HEALTHY_IDLE_INTERVAL_MS = 5 * 60_000;
     private static final long E2E_RETRY_MIN_MS = 500;
-    private static final long E2E_RETRY_MAX_MS = 8_000;
+    private static final long E2E_RETRY_ACTIVE_MAX_MS = 8_000;
+    private static final long E2E_RETRY_IDLE_MIN_MS = 8_000;
+    private static final long E2E_RETRY_IDLE_ONE_MINUTE_MS = 60_000;
+    private static final long E2E_RETRY_IDLE_MAX_MS = 5 * 60_000;
+    private static final long E2E_RETRY_IDLE_SCREEN_CHECK_MS = 30_000;
 
     private final ExecutorService worker =
             Executors.newSingleThreadExecutor();
@@ -308,7 +314,7 @@ public final class NativeVpnSmokeService extends VpnService {
             if (ready
                     && !sleepForSession(
                             session,
-                            E2E_HEALTHY_INTERVAL_MS
+                            healthyE2eIntervalMs()
                     )) {
                 return;
             }
@@ -391,19 +397,123 @@ public final class NativeVpnSmokeService extends VpnService {
                     }
                 }
 
-                if (!sleepForSession(
+                long retrySleepMs =
+                        recoveryRetryDelayMs(
+                                retryDelayMs
+                        );
+
+                if (!sleepForRecoverySession(
                         session,
-                        retryDelayMs
+                        retrySleepMs
                 )) {
                     return;
                 }
 
-                retryDelayMs = Math.min(
-                        retryDelayMs * 2,
-                        E2E_RETRY_MAX_MS
-                );
+                retryDelayMs =
+                        nextRecoveryRetryDelayMs(
+                                retrySleepMs
+                        );
             }
         }
+    }
+
+    private boolean isInteractive() {
+        PowerManager powerManager =
+                getSystemService(PowerManager.class);
+
+        return powerManager == null
+                || powerManager.isInteractive();
+    }
+
+    private long healthyE2eIntervalMs() {
+        return isInteractive()
+                ? E2E_HEALTHY_ACTIVE_INTERVAL_MS
+                : E2E_HEALTHY_IDLE_INTERVAL_MS;
+    }
+
+    private long recoveryRetryDelayMs(
+            long currentDelayMs
+    ) {
+        if (isInteractive()) {
+            return Math.min(
+                    currentDelayMs,
+                    E2E_RETRY_ACTIVE_MAX_MS
+            );
+        }
+
+        return Math.max(
+                currentDelayMs,
+                E2E_RETRY_IDLE_MIN_MS
+        );
+    }
+
+    private long nextRecoveryRetryDelayMs(
+            long currentDelayMs
+    ) {
+        if (isInteractive()) {
+            return Math.min(
+                    currentDelayMs * 2,
+                    E2E_RETRY_ACTIVE_MAX_MS
+            );
+        }
+
+        if (currentDelayMs
+                < E2E_RETRY_IDLE_ONE_MINUTE_MS) {
+            return Math.min(
+                    currentDelayMs * 2,
+                    E2E_RETRY_IDLE_ONE_MINUTE_MS
+            );
+        }
+
+        return Math.min(
+                currentDelayMs * 2,
+                E2E_RETRY_IDLE_MAX_MS
+        );
+    }
+
+    private boolean sleepForRecoverySession(
+            int session,
+            long delayMs
+    ) throws InterruptedException {
+        if (isInteractive()) {
+            return sleepForSession(
+                    session,
+                    Math.min(
+                            delayMs,
+                            E2E_RETRY_ACTIVE_MAX_MS
+                    )
+            );
+        }
+
+        long remainingMs = delayMs;
+
+        while (remainingMs > 0) {
+            long sliceMs = Math.min(
+                    remainingMs,
+                    E2E_RETRY_IDLE_SCREEN_CHECK_MS
+            );
+
+            if (!sleepForSession(
+                    session,
+                    sliceMs
+            )) {
+                return false;
+            }
+
+            remainingMs -= sliceMs;
+
+            /*
+             * If the user wakes the screen while an idle backoff is
+             * running, do not make them wait for the rest of a multi-minute
+             * sleep. The next recovery probe starts immediately after this
+             * bounded screen-state check.
+             */
+            if (isInteractive()) {
+                return isCurrent(session);
+            }
+        }
+
+        return isCurrent(session);
     }
 
     private boolean sleepForSession(

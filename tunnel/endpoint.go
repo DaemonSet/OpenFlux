@@ -8,9 +8,6 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
-
-	"universal-bypass-tool/network"
-	"universal-bypass-tool/utils"
 )
 
 type TunnelLinkEndpoint struct {
@@ -26,7 +23,6 @@ func NewTunnelLinkEndpoint() *TunnelLinkEndpoint {
 
 func (e *TunnelLinkEndpoint) InjectInbound(data []byte) {
 	e.packetIn.Add(1)
-	utils.Debugf("<- %d bytes - %s\n", len(data), network.ParsePacketInfo(data))
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 		Payload: buffer.MakeWithData(append([]byte{}, data...)),
 	})
