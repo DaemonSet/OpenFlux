@@ -158,3 +158,59 @@ func TestResilientVolgaExitBoundsXivaConnectionAge(t *testing.T) {
 		t.Fatalf("client websocket max age=%s want disabled", clientSession.cfg.WSMaxConnectionAge)
 	}
 }
+
+func TestResilientVolgaForcedRecoveryReplacesConnectedSession(t *testing.T) {
+	var mu sync.Mutex
+	var made []*fakeResilientVolgaSession
+	factory := func(string, transport.TransportConfig) resilientVolgaSession {
+		session := &fakeResilientVolgaSession{}
+		mu.Lock()
+		made = append(made, session)
+		mu.Unlock()
+		return session
+	}
+
+	r := newResilientYandexVolgaTransport(
+		"https://example.invalid/doc",
+		transport.DefaultConfig(),
+		factory,
+	)
+	r.reconnectMinDelay = time.Millisecond
+	r.reconnectMaxDelay = 5 * time.Millisecond
+
+	if err := r.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+
+	mu.Lock()
+	first := made[0]
+	mu.Unlock()
+
+	if !r.ForceRecover("unit test") {
+		t.Fatal("forced recovery request was rejected")
+	}
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		count := len(made)
+		var secondConnected bool
+		if count >= 2 {
+			secondConnected = made[1].connected.Load()
+		}
+		mu.Unlock()
+
+		if count >= 2 && secondConnected && r.IsConnected() {
+			if !first.stopped.Load() {
+				t.Fatal("old Volga session was not stopped")
+			}
+			if got := r.reconnects.Load(); got != 1 {
+				t.Fatalf("reconnects=%d want 1", got)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("forced recovery did not replace the connected Volga session")
+}

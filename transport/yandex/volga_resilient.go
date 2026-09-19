@@ -56,7 +56,8 @@ type ResilientYandexVolgaTransport struct {
 	reconnectMaxDelay time.Duration
 	reconnectFactor   float64
 
-	reconnects atomic.Uint64
+	reconnects     atomic.Uint64
+	forcedRecovery atomic.Bool
 }
 
 func NewResilientYandexVolgaTransport(docURL string, cfg transport.TransportConfig) *ResilientYandexVolgaTransport {
@@ -153,6 +154,34 @@ func (t *ResilientYandexVolgaTransport) Receive(callback func([]byte)) {
 	t.mu.Lock()
 	t.receiver = callback
 	t.mu.Unlock()
+}
+
+// ForceRecover replaces the complete inner Volga session while keeping the
+// outer OpenFlux process and transport stack alive. It is intentionally
+// asynchronous so an operator-triggered recovery cannot block a signal handler.
+// Concurrent forced recoveries are collapsed into one in-flight recycle.
+func (t *ResilientYandexVolgaTransport) ForceRecover(reason string) bool {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "manual request"
+	}
+	if !t.IsRunning() {
+		return false
+	}
+	ctx := t.ctx
+	if ctx == nil || ctx.Err() != nil {
+		return false
+	}
+	if !t.forcedRecovery.CompareAndSwap(false, true) {
+		return false
+	}
+
+	t.eventf("[VOLGA] forced full session recycle requested: %s", reason)
+	go func() {
+		defer t.forcedRecovery.Store(false)
+		t.recoverSession(ctx, "forced recovery: "+reason)
+	}()
+	return true
 }
 
 func (t *ResilientYandexVolgaTransport) Stats() transport.TransportStats {

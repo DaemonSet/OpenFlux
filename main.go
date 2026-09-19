@@ -108,6 +108,10 @@ func main() {
 		log.Fatalf("Start %s transport: %v", carrierDisplay, err)
 	}
 
+	if *exitNode {
+		installExitRecoverySignal(carrier)
+	}
+
 	if !*exitNode && *dnsListen != "" {
 		dnsListener, err := startDNSTCPProxy(
 			*dnsListen,
