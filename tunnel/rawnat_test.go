@@ -33,3 +33,43 @@ func TestRawNATSeparatesIdenticalClientTuples(t *testing.T) {
 		t.Fatalf("second reverse mapping failed: %#v", got2)
 	}
 }
+
+func TestRawNATCapacityRecoversAfterExpiry(t *testing.T) {
+	table := newRawNATTable()
+	now := time.Unix(2000, 0)
+	remote := [4]byte{1, 1, 1, 1}
+	capacity := int(rawNATPortMax-rawNATPortMin) + 1
+
+	for i := 0; i < capacity; i++ {
+		key := rawFlowKey{
+			clientIP:   [4]byte{10, 10, 10, 2},
+			clientPort: uint16(i + 1000),
+			remoteIP:   remote,
+			remotePort: 443,
+		}
+		if _, ok := table.outbound(key, now); !ok {
+			t.Fatalf("allocation %d/%d failed", i+1, capacity)
+		}
+	}
+	if got := table.size(); got != capacity {
+		t.Fatalf("active mappings=%d want=%d", got, capacity)
+	}
+
+	overflow := rawFlowKey{
+		clientIP:   [4]byte{10, 10, 10, 3},
+		clientPort: 65000,
+		remoteIP:   remote,
+		remotePort: 443,
+	}
+	if _, ok := table.outbound(overflow, now); ok {
+		t.Fatal("allocation unexpectedly succeeded with a full NAT table")
+	}
+
+	later := now.Add(rawNATIdle + time.Second)
+	if _, ok := table.outbound(overflow, later); !ok {
+		t.Fatal("allocation did not recover after expired mappings were cleaned")
+	}
+	if got := table.size(); got != 1 {
+		t.Fatalf("active mappings after expiry=%d want=1", got)
+	}
+}

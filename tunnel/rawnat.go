@@ -6,9 +6,10 @@ import (
 )
 
 const (
-	rawNATPortMin = uint16(10000)
-	rawNATPortMax = uint16(29999)
-	rawNATIdle    = 30 * time.Minute
+	rawNATPortMin         = uint16(10000)
+	rawNATPortMax         = uint16(29999)
+	rawNATIdle            = 30 * time.Minute
+	rawNATCleanupInterval = 30 * time.Second
 )
 
 type rawFlowKey struct {
@@ -25,10 +26,11 @@ type rawNATFlow struct {
 }
 
 type rawNATTable struct {
-	mu       sync.Mutex
-	byClient map[rawFlowKey]*rawNATFlow
-	byEgress map[uint16]*rawNATFlow
-	nextPort uint16
+	mu          sync.Mutex
+	byClient    map[rawFlowKey]*rawNATFlow
+	byEgress    map[uint16]*rawNATFlow
+	nextPort    uint16
+	nextCleanup time.Time
 }
 
 func newRawNATTable() *rawNATTable {
@@ -42,13 +44,16 @@ func newRawNATTable() *rawNATTable {
 func (t *rawNATTable) outbound(key rawFlowKey, now time.Time) (uint16, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.cleanupLocked(now)
+	t.cleanupIfDueLocked(now)
 	if flow, ok := t.byClient[key]; ok {
 		flow.lastSeen = now
 		return flow.egressPort, true
 	}
 
 	span := int(rawNATPortMax-rawNATPortMin) + 1
+	if len(t.byEgress) >= span {
+		return 0, false
+	}
 	for i := 0; i < span; i++ {
 		port := t.nextPort
 		t.nextPort++
@@ -69,13 +74,27 @@ func (t *rawNATTable) outbound(key rawFlowKey, now time.Time) (uint16, bool) {
 func (t *rawNATTable) inbound(egressPort uint16, remoteIP [4]byte, remotePort uint16, now time.Time) (rawFlowKey, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.cleanupLocked(now)
+	t.cleanupIfDueLocked(now)
 	flow, ok := t.byEgress[egressPort]
 	if !ok || flow.key.remoteIP != remoteIP || flow.key.remotePort != remotePort {
 		return rawFlowKey{}, false
 	}
 	flow.lastSeen = now
 	return flow.key, true
+}
+
+func (t *rawNATTable) size() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.byClient)
+}
+
+func (t *rawNATTable) cleanupIfDueLocked(now time.Time) {
+	if !t.nextCleanup.IsZero() && now.Before(t.nextCleanup) {
+		return
+	}
+	t.cleanupLocked(now)
+	t.nextCleanup = now.Add(rawNATCleanupInterval)
 }
 
 func (t *rawNATTable) cleanupLocked(now time.Time) {
